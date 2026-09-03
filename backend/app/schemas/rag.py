@@ -13,6 +13,7 @@ class DocumentMetadata(BaseModel):
     filename: str
     file_type: str
     file_size: int
+    unit_id: str
     ingested_at: datetime
     chunk_count: int
 

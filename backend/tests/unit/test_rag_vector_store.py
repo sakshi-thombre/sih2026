@@ -5,13 +5,20 @@ from app.rag.base import DocumentChunk
 from app.rag.vector_store import LocalVectorStore
 
 
-def make_chunk(document_id: str, chunk_index: int, text: str, filename: str = "doc.txt") -> DocumentChunk:
+def make_chunk(
+    document_id: str,
+    chunk_index: int,
+    text: str,
+    filename: str = "doc.txt",
+    unit_id: str | None = "unit-1",
+) -> DocumentChunk:
     return DocumentChunk(
         document_id=document_id,
         filename=filename,
         chunk_id=f"{document_id}:{chunk_index}",
         text=text,
         score=0.0,
+        unit_id=unit_id,
         page_number=None,
         chunk_index=chunk_index,
     )
@@ -101,6 +108,48 @@ def test_add_rejects_mismatched_lengths(tmp_path) -> None:
         assert False, "expected ValueError"
     except ValueError:
         pass
+
+
+def test_search_with_unit_id_filters_to_matching_unit(tmp_path) -> None:
+    store = LocalVectorStore(str(tmp_path))
+    store.add([make_chunk("doc-1", 0, "unit A content", unit_id="unit-a")], [[1.0, 0.0]])
+    store.add([make_chunk("doc-2", 0, "unit B content", unit_id="unit-b")], [[1.0, 0.0]])
+
+    results = store.search([1.0, 0.0], top_k=10, unit_id="unit-a")
+
+    assert len(results) == 1
+    assert results[0].document_id == "doc-1"
+    assert results[0].unit_id == "unit-a"
+
+
+def test_search_with_unit_id_excludes_other_units_even_if_more_similar(tmp_path) -> None:
+    store = LocalVectorStore(str(tmp_path))
+    store.add([make_chunk("doc-1", 0, "own unit, less similar", unit_id="unit-a")], [[0.5, 0.5]])
+    store.add([make_chunk("doc-2", 0, "other unit, perfect match", unit_id="unit-b")], [[1.0, 0.0]])
+
+    results = store.search([1.0, 0.0], top_k=10, unit_id="unit-a")
+
+    assert len(results) == 1
+    assert results[0].document_id == "doc-1"
+
+
+def test_search_without_unit_id_returns_all_units(tmp_path) -> None:
+    store = LocalVectorStore(str(tmp_path))
+    store.add([make_chunk("doc-1", 0, "unit A content", unit_id="unit-a")], [[1.0, 0.0]])
+    store.add([make_chunk("doc-2", 0, "unit B content", unit_id="unit-b")], [[1.0, 0.0]])
+
+    results = store.search([1.0, 0.0], top_k=10, unit_id=None)
+
+    assert {r.document_id for r in results} == {"doc-1", "doc-2"}
+
+
+def test_search_with_unit_id_matching_nothing_returns_empty_list(tmp_path) -> None:
+    store = LocalVectorStore(str(tmp_path))
+    store.add([make_chunk("doc-1", 0, "unit A content", unit_id="unit-a")], [[1.0, 0.0]])
+
+    results = store.search([1.0, 0.0], top_k=10, unit_id="unit-nonexistent")
+
+    assert results == []
 
 
 def test_storage_files_are_not_pickle(tmp_path) -> None:

@@ -21,9 +21,16 @@ class IngestedDocument:
         self.chunks = chunks
 
 
-def prepare_document(filename: str, content: bytes, chunk_size: int, chunk_overlap: int) -> IngestedDocument:
+def prepare_document(
+    filename: str, content: bytes, chunk_size: int, chunk_overlap: int, unit_id: str
+) -> IngestedDocument:
     """Extract and chunk an uploaded file's content. Raises
-    `InvalidDocumentError` for anything that can't produce usable chunks."""
+    `InvalidDocumentError` for anything that can't produce usable chunks.
+
+    `unit_id` is stamped onto every resulting chunk — the caller (see
+    app.services.rag_service.ingest_document) is responsible for
+    determining it from the authenticated user, never from this
+    function or the raw upload."""
     extracted: ExtractedDocument = load_document(filename, content)
     chunks = chunk_document(extracted.pages, chunk_size, chunk_overlap)
     if not chunks:
@@ -41,6 +48,7 @@ def prepare_document(filename: str, content: bytes, chunk_size: int, chunk_overl
             chunk_id=f"{document_id}:{chunk.chunk_index}",
             text=chunk.text,
             score=0.0,
+            unit_id=unit_id,
             page_number=chunk.page_number,
             chunk_index=chunk.chunk_index,
         )

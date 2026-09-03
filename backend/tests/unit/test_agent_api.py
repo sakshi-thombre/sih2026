@@ -22,9 +22,11 @@ from app.api.deps import (
 from app.clients.agent_client import AgentClient
 from app.core.exceptions import ServiceUnavailableError
 from app.main import app
+from app.rag.base import DocumentChunk, Retriever
 from app.runs.store import InMemoryActionStore, InMemoryRunStore
 from app.schemas.agent import AgentRunRequest, AgentRunResult
 from app.tools.base import Tool, ToolRegistry, ToolResult
+from app.tools.document_search_tool import DocumentSearchTool
 from pydantic import BaseModel
 
 
@@ -38,7 +40,7 @@ class EchoTool(Tool):
     input_schema = EchoInput
     required_role = None
 
-    async def run(self, input_data: BaseModel) -> ToolResult:
+    async def run(self, input_data: BaseModel, *, caller: dict[str, str]) -> ToolResult:
         assert isinstance(input_data, EchoInput)
         return ToolResult(success=True, data={"echoed": input_data.message})
 
@@ -80,10 +82,19 @@ def teardown_function() -> None:
     app.dependency_overrides.pop(verify_internal_service, None)
 
 
-def _override(agent_client: AgentClient, role: str = "engineer") -> tuple[InMemoryRunStore, InMemoryActionStore]:
+def _override(
+    agent_client: AgentClient,
+    role: str = "engineer",
+    unit_id: str = "",
+    registry: ToolRegistry | None = None,
+) -> tuple[InMemoryRunStore, InMemoryActionStore]:
     run_store = InMemoryRunStore()
     action_store = InMemoryActionStore()
-    app.dependency_overrides[get_current_user] = lambda: {"user_id": "user-1", "role": role}
+    app.dependency_overrides[get_current_user] = lambda: {
+        "user_id": "user-1",
+        "role": role,
+        "unit_id": unit_id,
+    }
     app.dependency_overrides[get_run_store] = lambda: run_store
     app.dependency_overrides[get_action_store] = lambda: action_store
     # /tools/execute (called by Person C's service, not the frontend)
@@ -94,8 +105,9 @@ def _override(agent_client: AgentClient, role: str = "engineer") -> tuple[InMemo
     app.dependency_overrides[get_service_run_store] = lambda: run_store
     app.dependency_overrides[get_service_action_store] = lambda: action_store
     app.dependency_overrides[get_agent_client] = lambda: agent_client
-    registry = ToolRegistry()
-    registry.register(EchoTool())
+    if registry is None:
+        registry = ToolRegistry()
+        registry.register(EchoTool())
     app.dependency_overrides[get_tool_registry] = lambda: registry
     return run_store, action_store
 
@@ -308,6 +320,141 @@ def test_tool_execute_rejects_wrong_internal_service_token() -> None:
 
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "permission_denied"
+
+
+class FakeDocumentRetriever(Retriever):
+    """Filters by unit_id the same way the real VectorStoreRetriever/
+    LocalVectorStore do, so these tests exercise the same contract
+    DocumentSearchTool relies on without needing a real vector store."""
+
+    def __init__(self, chunks: list[DocumentChunk]) -> None:
+        self._chunks = chunks
+        self.last_unit_id: str | None = "NOT_CALLED"
+
+    async def retrieve(self, query: str, top_k: int = 5, unit_id: str | None = None) -> list[DocumentChunk]:
+        self.last_unit_id = unit_id
+        if unit_id is None:
+            return list(self._chunks[:top_k])
+        return [c for c in self._chunks if c.unit_id == unit_id][:top_k]
+
+
+def _chunk(document_id: str, unit_id: str) -> DocumentChunk:
+    return DocumentChunk(
+        document_id=document_id,
+        filename=f"{document_id}.pdf",
+        chunk_id=f"{document_id}:0",
+        text="content",
+        score=0.9,
+        unit_id=unit_id,
+        page_number=1,
+        chunk_index=0,
+    )
+
+
+def _document_search_registry(retriever: Retriever) -> ToolRegistry:
+    registry = ToolRegistry()
+    registry.register(DocumentSearchTool(retriever))
+    return registry
+
+
+def test_agent_document_search_engineer_only_returns_own_unit() -> None:
+    retriever = FakeDocumentRetriever([_chunk("doc-a", "unit-a"), _chunk("doc-b", "unit-b")])
+    _override(
+        FakeAgentClient(result=success_result()),
+        role="engineer",
+        unit_id="unit-a",
+        registry=_document_search_registry(retriever),
+    )
+    create_response = client.post("/api/v1/agent/runs", json={"task": "t"})
+    run_id = create_response.json()["run_id"]
+
+    response = client.post(
+        "/api/v1/agent/tools/execute",
+        json={"run_id": run_id, "tool_name": "document_search", "input": {"query": "safety", "top_k": 5}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert {chunk["document_id"] for chunk in body["data"]} == {"doc-a"}
+    assert retriever.last_unit_id == "unit-a"
+
+
+def test_agent_document_search_engineer_cannot_request_another_unit_via_input() -> None:
+    """DocumentSearchInput has no unit_id field, so a unit_id an agent
+    puts in the tool's `input` is dropped by schema validation before
+    DocumentSearchTool ever sees it — the run's own trusted unit_id
+    (from the authenticated caller at run-creation time) is always
+    what's used instead."""
+    retriever = FakeDocumentRetriever([_chunk("doc-a", "unit-a"), _chunk("doc-b", "unit-b")])
+    _override(
+        FakeAgentClient(result=success_result()),
+        role="engineer",
+        unit_id="unit-a",
+        registry=_document_search_registry(retriever),
+    )
+    create_response = client.post("/api/v1/agent/runs", json={"task": "t"})
+    run_id = create_response.json()["run_id"]
+
+    response = client.post(
+        "/api/v1/agent/tools/execute",
+        json={
+            "run_id": run_id,
+            "tool_name": "document_search",
+            "input": {"query": "safety", "top_k": 5, "unit_id": "unit-b"},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert {chunk["document_id"] for chunk in body["data"]} == {"doc-a"}
+    assert retriever.last_unit_id == "unit-a"
+
+
+def test_agent_document_search_manager_returns_multiple_units() -> None:
+    retriever = FakeDocumentRetriever([_chunk("doc-a", "unit-a"), _chunk("doc-b", "unit-b")])
+    _override(
+        FakeAgentClient(result=success_result()),
+        role="manager",
+        unit_id="",
+        registry=_document_search_registry(retriever),
+    )
+    create_response = client.post("/api/v1/agent/runs", json={"task": "t"})
+    run_id = create_response.json()["run_id"]
+
+    response = client.post(
+        "/api/v1/agent/tools/execute",
+        json={"run_id": run_id, "tool_name": "document_search", "input": {"query": "safety", "top_k": 5}},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert {chunk["document_id"] for chunk in body["data"]} == {"doc-a", "doc-b"}
+    assert retriever.last_unit_id is None
+
+
+def test_agent_document_search_missing_engineer_unit_fails_safely() -> None:
+    retriever = FakeDocumentRetriever([_chunk("doc-a", "unit-a")])
+    _override(
+        FakeAgentClient(result=success_result()),
+        role="engineer",
+        unit_id="",
+        registry=_document_search_registry(retriever),
+    )
+    create_response = client.post("/api/v1/agent/runs", json={"task": "t"})
+    run_id = create_response.json()["run_id"]
+
+    response = client.post(
+        "/api/v1/agent/tools/execute",
+        json={"run_id": run_id, "tool_name": "document_search", "input": {"query": "safety", "top_k": 5}},
+    )
+
+    assert response.status_code == 200  # a tool failure, not an HTTP/permission error
+    body = response.json()
+    assert body["success"] is False
+    assert body["data"] is None
+    assert retriever.last_unit_id == "NOT_CALLED"  # retriever never invoked with no unit to scope by
 
 
 @pytest.fixture

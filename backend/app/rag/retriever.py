@@ -12,7 +12,7 @@ class VectorStoreRetriever(Retriever):
         self._vector_store = vector_store
         self._embedding_provider = embedding_provider
 
-    async def retrieve(self, query: str, top_k: int = 5) -> list[DocumentChunk]:
+    async def retrieve(self, query: str, top_k: int = 5, unit_id: str | None = None) -> list[DocumentChunk]:
         if not query or not query.strip():
             raise ValueError("query must not be empty")
         if top_k <= 0:
@@ -20,4 +20,4 @@ class VectorStoreRetriever(Retriever):
 
         embeddings = await self._embedding_provider.embed([query])
         query_embedding = embeddings[0]
-        return self._vector_store.search(query_embedding, top_k)
+        return self._vector_store.search(query_embedding, top_k, unit_id=unit_id)

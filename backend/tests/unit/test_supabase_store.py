@@ -38,7 +38,7 @@ def make_supabase_client(handler) -> AsyncClient:
 
 
 def make_run(**overrides) -> AgentRun:
-    defaults = dict(user_id="user-1", role="engineer", task="do something")
+    defaults = dict(user_id="user-1", role="engineer", unit_id="", task="do something")
     defaults.update(overrides)
     return AgentRun(**defaults)
 
@@ -370,6 +370,7 @@ def test_run_to_row_serializes_status_and_timestamps_to_plain_json_types() -> No
             "chunk_id": "doc-1:0",
             "text": "some text",
             "score": 0.5,
+            "unit_id": None,
             "page_number": 3,
             "chunk_index": None,
         }
@@ -474,6 +475,40 @@ def test_run_to_row_then_row_to_run_round_trip_preserves_fields() -> None:
     assert round_tripped.answer == run.answer
     assert round_tripped.plan_summary == run.plan_summary
     assert round_tripped.tools_used == run.tools_used
+
+
+def test_run_to_row_then_row_to_run_round_trip_preserves_non_empty_unit_id() -> None:
+    """unit_id is the trusted context tool_execution_service reads back
+    to enforce document search isolation (see app.services.
+    tool_execution_service) — a round-trip that silently dropped or
+    mangled it would reopen the cross-unit gap that field exists to
+    close."""
+    run = make_run(unit_id="11111111-1111-1111-1111-111111111111")
+
+    row = row_for(run)
+    round_tripped = _row_to_run(row)
+
+    assert round_tripped.unit_id == "11111111-1111-1111-1111-111111111111"
+
+
+def test_run_to_row_serializes_empty_unit_id_as_null() -> None:
+    """agent_action_logs.unit_id is a `uuid` column (see
+    supabase/migrations/0005_agent_run_unit_id.sql) — sending "" would
+    be rejected by Postgres, so an unassigned unit_id (e.g. a manager's
+    run) must be written as SQL NULL, not the empty string."""
+    run = make_run(unit_id="")
+
+    row = _run_to_row(run)
+
+    assert row["unit_id"] is None
+
+
+def test_row_to_run_restores_null_unit_id_as_empty_string() -> None:
+    row = row_for(make_run(unit_id=""))
+
+    round_tripped = _row_to_run(row)
+
+    assert round_tripped.unit_id == ""
 
 
 @pytest.fixture

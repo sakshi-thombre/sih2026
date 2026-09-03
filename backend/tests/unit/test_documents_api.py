@@ -32,11 +32,13 @@ class FakeVectorStore(VectorStore):
     def __init__(self, search_results: list[DocumentChunk] | None = None) -> None:
         self.added: list[tuple[Any, Any]] = []
         self._search_results = search_results or []
+        self.last_search_unit_id: str | None = None
 
     def add(self, chunks: Any, embeddings: Any) -> None:
         self.added.append((chunks, embeddings))
 
-    def search(self, query_embedding: list[float], top_k: int) -> list[DocumentChunk]:
+    def search(self, query_embedding: list[float], top_k: int, unit_id: str | None = None) -> list[DocumentChunk]:
+        self.last_search_unit_id = unit_id
         return self._search_results[:top_k]
 
     def delete(self, document_id: str) -> None:
@@ -56,10 +58,20 @@ def teardown_function() -> None:
     app.dependency_overrides.pop(get_settings, None)
 
 
-def _override(embedding_provider: EmbeddingProvider, vector_store: VectorStore) -> None:
+def _override(
+    embedding_provider: EmbeddingProvider,
+    vector_store: VectorStore,
+    user: dict[str, str] | None = None,
+) -> None:
     """Overrides for an authenticated caller — the common case, used by
-    every test below except the dedicated unauthenticated-request tests."""
-    app.dependency_overrides[get_current_user] = lambda: {"user_id": "user-1", "role": "engineer"}
+    every test below except the dedicated unauthenticated-request tests.
+    Defaults to an engineer in unit-a; pass `user` to test other
+    roles/units."""
+    app.dependency_overrides[get_current_user] = lambda: user or {
+        "user_id": "user-1",
+        "role": "engineer",
+        "unit_id": "unit-a",
+    }
     app.dependency_overrides[get_embedding_provider] = lambda: embedding_provider
     app.dependency_overrides[get_vector_store] = lambda: vector_store
 
@@ -240,7 +252,7 @@ def test_search_without_auth_returns_401() -> None:
 
 def test_search_vector_store_unavailable_returns_503() -> None:
     class BrokenVectorStore(FakeVectorStore):
-        def search(self, query_embedding: list[float], top_k: int) -> list[DocumentChunk]:
+        def search(self, query_embedding: list[float], top_k: int, unit_id: str | None = None) -> list[DocumentChunk]:
             raise ConnectionError("disk unavailable")
 
     _override(FakeEmbeddingProvider(), BrokenVectorStore())
@@ -249,3 +261,143 @@ def test_search_vector_store_unavailable_returns_503() -> None:
 
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "service_unavailable"
+
+
+# ---------------------------------------------------------------------------
+# Unit isolation
+# ---------------------------------------------------------------------------
+# Engineers are confined to their own authenticated unit_id (never a
+# client-supplied one); managers upload to an explicit target unit and
+# search across all units. See app/api/v1/endpoints/documents.py's
+# _resolve_upload_unit_id / _resolve_search_unit_id.
+
+_ENGINEER = {"user_id": "user-1", "role": "engineer", "unit_id": "unit-a"}
+_ENGINEER_NO_UNIT = {"user_id": "user-2", "role": "engineer", "unit_id": ""}
+_MANAGER = {"user_id": "user-3", "role": "manager", "unit_id": "unit-a"}
+_VALID_TARGET_UNIT = "22222222-2222-2222-2222-222222222222"
+
+
+def test_engineer_upload_is_stamped_with_their_own_unit_id() -> None:
+    vector_store = FakeVectorStore()
+    _override(FakeEmbeddingProvider(), vector_store, user=_ENGINEER)
+
+    response = client.post(
+        "/api/v1/documents/upload",
+        files={"file": ("sop.txt", b"Pressure relief valves protect equipment.", "text/plain")},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["document"]["unit_id"] == "unit-a"
+    chunks, _ = vector_store.added[0]
+    assert all(chunk.unit_id == "unit-a" for chunk in chunks)
+
+
+def test_engineer_upload_ignores_matching_supplied_unit_id() -> None:
+    vector_store = FakeVectorStore()
+    _override(FakeEmbeddingProvider(), vector_store, user=_ENGINEER)
+
+    response = client.post(
+        "/api/v1/documents/upload",
+        files={"file": ("sop.txt", b"Pressure relief valves protect equipment.", "text/plain")},
+        data={"unit_id": "unit-a"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["document"]["unit_id"] == "unit-a"
+
+
+def test_engineer_cannot_upload_into_another_unit() -> None:
+    vector_store = FakeVectorStore()
+    _override(FakeEmbeddingProvider(), vector_store, user=_ENGINEER)
+
+    response = client.post(
+        "/api/v1/documents/upload",
+        files={"file": ("sop.txt", b"Pressure relief valves protect equipment.", "text/plain")},
+        data={"unit_id": "unit-b"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "permission_denied"
+    assert vector_store.added == []
+
+
+def test_engineer_without_assigned_unit_cannot_upload() -> None:
+    _override(FakeEmbeddingProvider(), FakeVectorStore(), user=_ENGINEER_NO_UNIT)
+
+    response = client.post(
+        "/api/v1/documents/upload",
+        files={"file": ("sop.txt", b"Pressure relief valves protect equipment.", "text/plain")},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "permission_denied"
+
+
+def test_engineer_search_is_filtered_to_their_own_unit() -> None:
+    vector_store = FakeVectorStore()
+    _override(FakeEmbeddingProvider(), vector_store, user=_ENGINEER)
+
+    response = client.post("/api/v1/documents/search", json={"query": "test", "top_k": 5})
+
+    assert response.status_code == 200
+    assert vector_store.last_search_unit_id == "unit-a"
+
+
+def test_engineer_without_assigned_unit_cannot_search() -> None:
+    _override(FakeEmbeddingProvider(), FakeVectorStore(), user=_ENGINEER_NO_UNIT)
+
+    response = client.post("/api/v1/documents/search", json={"query": "test", "top_k": 5})
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "permission_denied"
+
+
+def test_manager_search_is_not_filtered_by_unit() -> None:
+    vector_store = FakeVectorStore()
+    _override(FakeEmbeddingProvider(), vector_store, user=_MANAGER)
+
+    response = client.post("/api/v1/documents/search", json={"query": "test", "top_k": 5})
+
+    assert response.status_code == 200
+    assert vector_store.last_search_unit_id is None
+
+
+def test_manager_upload_requires_an_explicit_target_unit() -> None:
+    _override(FakeEmbeddingProvider(), FakeVectorStore(), user=_MANAGER)
+
+    response = client.post(
+        "/api/v1/documents/upload",
+        files={"file": ("sop.txt", b"Pressure relief valves protect equipment.", "text/plain")},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_document"
+
+
+def test_manager_upload_rejects_malformed_target_unit_id() -> None:
+    _override(FakeEmbeddingProvider(), FakeVectorStore(), user=_MANAGER)
+
+    response = client.post(
+        "/api/v1/documents/upload",
+        files={"file": ("sop.txt", b"Pressure relief valves protect equipment.", "text/plain")},
+        data={"unit_id": "not-a-uuid"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_document"
+
+
+def test_manager_upload_succeeds_with_valid_target_unit() -> None:
+    vector_store = FakeVectorStore()
+    _override(FakeEmbeddingProvider(), vector_store, user=_MANAGER)
+
+    response = client.post(
+        "/api/v1/documents/upload",
+        files={"file": ("sop.txt", b"Pressure relief valves protect equipment.", "text/plain")},
+        data={"unit_id": _VALID_TARGET_UNIT},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["document"]["unit_id"] == _VALID_TARGET_UNIT
+    chunks, _ = vector_store.added[0]
+    assert all(chunk.unit_id == _VALID_TARGET_UNIT for chunk in chunks)

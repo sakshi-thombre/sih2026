@@ -72,6 +72,7 @@ async def create_run(
         context=request.context,
         user_id=user.get("user_id", "unknown"),
         role=user.get("role", ""),
+        unit_id=user.get("unit_id", ""),
         run_store=run_store,
         action_store=action_store,
     )

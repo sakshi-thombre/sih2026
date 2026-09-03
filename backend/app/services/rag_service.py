@@ -26,12 +26,13 @@ async def ingest_document(
     *,
     filename: str,
     content: bytes,
+    unit_id: str,
     embedding_provider: EmbeddingProvider,
     vector_store: VectorStore,
     chunk_size: int,
     chunk_overlap: int,
 ) -> DocumentMetadata:
-    ingested = prepare_document(filename, content, chunk_size, chunk_overlap)
+    ingested = prepare_document(filename, content, chunk_size, chunk_overlap, unit_id)
 
     texts = [chunk.text for chunk in ingested.chunks]
     embeddings = await embedding_provider.embed(texts)
@@ -51,6 +52,7 @@ async def ingest_document(
                 "document_id": ingested.document_id,
                 "filename": ingested.filename,
                 "file_type": ingested.file_type,
+                "unit_id": unit_id,
                 "chunk_count": len(ingested.chunks),
             },
         )
@@ -61,6 +63,7 @@ async def ingest_document(
         filename=ingested.filename,
         file_type=ingested.file_type,
         file_size=len(content),
+        unit_id=unit_id,
         ingested_at=datetime.now(timezone.utc),
         chunk_count=len(ingested.chunks),
     )
@@ -70,14 +73,20 @@ async def search_documents(
     *,
     query: str,
     top_k: int,
+    unit_id: str | None,
     embedding_provider: EmbeddingProvider,
     vector_store: VectorStore,
 ) -> list[DocumentChunk]:
+    """`unit_id` is the enforcement point for unit-scoped search — pass
+    the caller's own unit_id to restrict results to it (engineers), or
+    None to search across all units (managers). See
+    app.api.v1.endpoints.documents for how the two roles are mapped to
+    this parameter; it is never taken from client-supplied input."""
     embeddings = await embedding_provider.embed([query])
     query_embedding = embeddings[0]
 
     try:
-        results = vector_store.search(query_embedding, top_k)
+        results = vector_store.search(query_embedding, top_k, unit_id=unit_id)
     except ServiceUnavailableError:
         raise
     except Exception as exc:
@@ -87,7 +96,7 @@ async def search_documents(
     log_event(
         AuditEvent(
             event_type="document_search",
-            metadata={"top_k": top_k, "result_count": len(results)},
+            metadata={"top_k": top_k, "unit_id": unit_id, "result_count": len(results)},
         )
     )
 

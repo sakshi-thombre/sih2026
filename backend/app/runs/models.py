@@ -32,6 +32,12 @@ class AgentRun(BaseModel):
     request_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     user_id: str
     role: str
+    # Authenticated caller's unit at run-creation time (see get_current_user).
+    # Persisted here, not read from the agent service's tool-execution
+    # request, so a tool like document_search can enforce unit isolation
+    # from a trusted source even though /tools/execute carries no end-user
+    # identity of its own — see app.services.tool_execution_service.
+    unit_id: str = ""
     task: str
     context: dict[str, Any] = Field(default_factory=dict)
     status: RunStatus = RunStatus.CREATED

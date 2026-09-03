@@ -40,10 +40,13 @@ async def create_run(
     context: dict,
     user_id: str,
     role: str,
+    unit_id: str = "",
     run_store: RunStore,
     action_store: ActionStore,
 ) -> AgentRun:
-    run = AgentRun(user_id=user_id, role=role, task=task, context=context, status=RunStatus.CREATED)
+    run = AgentRun(
+        user_id=user_id, role=role, unit_id=unit_id, task=task, context=context, status=RunStatus.CREATED
+    )
     await run_store.create(run)
     await run_store.compare_and_set_status(run.run_id, RunStatus.CREATED, RunStatus.QUEUED)
     run.status = RunStatus.QUEUED
