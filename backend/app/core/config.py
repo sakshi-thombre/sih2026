@@ -1,6 +1,12 @@
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# The only `environment` value that may run with no internal-service
+# token configured — see `Settings._validate_internal_service_token`.
+# Everything else (staging, production, or any other deployment name)
+# is treated as production-like and must set INTERNAL_SERVICE_TOKEN.
+_DEVELOPMENT_ENVIRONMENT = "development"
+
 
 class Settings(BaseSettings):
     app_name: str = "MRPL AI Workbench"
@@ -68,12 +74,17 @@ class Settings(BaseSettings):
     agent_service_base_url: str = "http://localhost:8100"
     agent_service_timeout_seconds: float = 30.0
 
-    # Service-to-service auth placeholder for endpoints Person C's agent
-    # service calls into (e.g. POST /api/v1/agent/tools/execute), as
-    # opposed to endpoints the frontend calls. Left unset by default so
-    # local dev/testing needs no extra setup; when set, callers must
-    # present a matching X-Internal-Service-Token header. Person D owns
-    # the eventual real service-to-service auth mechanism.
+    # Service-to-service auth for endpoints Person C's agent service
+    # calls into (currently POST /api/v1/agent/tools/execute, which uses
+    # the RLS-bypassing service-role Supabase key — see
+    # app.db.session.get_service_db), as opposed to endpoints the
+    # frontend calls. Callers must present a matching
+    # X-Internal-Service-Token header (checked with a constant-time
+    # comparison — see app.api.deps.verify_internal_service). May be
+    # left unset only when ENVIRONMENT=development, so local dev/testing
+    # needs no extra setup; see `_validate_internal_service_token` below,
+    # which fails startup otherwise. Person D owns the eventual
+    # permanent service-to-service auth mechanism.
     internal_service_token: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -99,6 +110,27 @@ class Settings(BaseSettings):
             raise ValueError("max_top_k must be positive")
         if self.embedding_batch_size <= 0:
             raise ValueError("embedding_batch_size must be positive")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_internal_service_token(self) -> "Settings":
+        """Fails startup rather than silently running with internal-service
+        auth disabled. Without this, an unset/empty INTERNAL_SERVICE_TOKEN
+        makes `verify_internal_service` a no-op, leaving
+        POST /api/v1/agent/tools/execute (service-role Supabase access,
+        bypassing RLS) reachable by anyone. Development is the one
+        environment allowed to skip this, so local setup needs no extra
+        configuration."""
+        if self.environment != _DEVELOPMENT_ENVIRONMENT and not self.internal_service_token:
+            raise ValueError(
+                "INTERNAL_SERVICE_TOKEN must be set to a non-empty value when "
+                f"ENVIRONMENT is not '{_DEVELOPMENT_ENVIRONMENT}' (got "
+                f"'{self.environment}'). This token guards "
+                "POST /api/v1/agent/tools/execute, which uses the "
+                "RLS-bypassing Supabase service-role key. Set "
+                "INTERNAL_SERVICE_TOKEN in your environment/.env, or set "
+                f"ENVIRONMENT={_DEVELOPMENT_ENVIRONMENT} for local development only."
+            )
         return self
 
 
