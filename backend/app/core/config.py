@@ -16,6 +16,15 @@ class Settings(BaseSettings):
     # .env once the connection details and schema are finalized.
     database_url: str | None = None
 
+    # CORS: origins the frontend is served from, comma-separated (e.g.
+    # "http://localhost:3000,http://localhost:5173" covers the default
+    # Next.js/CRA and Vite dev ports). Never add "*" here — the
+    # frontend sends credentials (the Supabase JWT via Authorization
+    # header), and browsers reject a wildcard origin combined with
+    # credentialed requests. Change per environment via .env; see
+    # `cors_allow_origins` for the parsed list CORSMiddleware uses.
+    frontend_origins: str = "http://localhost:3000,http://localhost:5173"
+
     # Supabase project the backend talks to via PostgREST (through the
     # supabase-py client), not a direct Postgres connection — see
     # app/db/session.py. `supabase_anon_key` is used for every
@@ -68,6 +77,15 @@ class Settings(BaseSettings):
     internal_service_token: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @property
+    def cors_allow_origins(self) -> list[str]:
+        """Parses `frontend_origins` into the list `CORSMiddleware`
+        expects. A plain comma-separated string (rather than a `list`
+        field) avoids pydantic-settings' JSON-parsing requirement for
+        list-typed env vars, so `.env` can just be
+        `FRONTEND_ORIGINS=http://localhost:3000,http://localhost:5173`."""
+        return [origin.strip() for origin in self.frontend_origins.split(",") if origin.strip()]
 
     @model_validator(mode="after")
     def _validate_rag_settings(self) -> "Settings":

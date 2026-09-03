@@ -9,7 +9,7 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
-from app.api.deps import get_embedding_provider, get_settings, get_vector_store
+from app.api.deps import get_current_user, get_embedding_provider, get_settings, get_vector_store
 from app.core.config import Settings, settings as real_settings
 from app.core.exceptions import ServiceUnavailableError
 from app.rag.base import DocumentChunk
@@ -50,12 +50,25 @@ client = TestClient(app)
 
 
 def teardown_function() -> None:
+    app.dependency_overrides.pop(get_current_user, None)
     app.dependency_overrides.pop(get_embedding_provider, None)
     app.dependency_overrides.pop(get_vector_store, None)
     app.dependency_overrides.pop(get_settings, None)
 
 
 def _override(embedding_provider: EmbeddingProvider, vector_store: VectorStore) -> None:
+    """Overrides for an authenticated caller — the common case, used by
+    every test below except the dedicated unauthenticated-request tests."""
+    app.dependency_overrides[get_current_user] = lambda: {"user_id": "user-1", "role": "engineer"}
+    app.dependency_overrides[get_embedding_provider] = lambda: embedding_provider
+    app.dependency_overrides[get_vector_store] = lambda: vector_store
+
+
+def _override_without_auth(embedding_provider: EmbeddingProvider, vector_store: VectorStore) -> None:
+    """Same as `_override`, but get_current_user is intentionally NOT
+    overridden — with no Authorization header, its get_bearer_token
+    dependency raises UnauthorizedError before any Supabase call is
+    attempted, mirroring test_agent_api.py::test_create_run_without_auth_fails_closed."""
     app.dependency_overrides[get_embedding_provider] = lambda: embedding_provider
     app.dependency_overrides[get_vector_store] = lambda: vector_store
 
@@ -199,6 +212,30 @@ def test_search_rejects_top_k_above_maximum() -> None:
     )
 
     assert response.status_code == 422
+
+
+def test_upload_without_auth_returns_401() -> None:
+    _override_without_auth(FakeEmbeddingProvider(), FakeVectorStore())
+
+    response = client.post(
+        "/api/v1/documents/upload",
+        files={"file": ("sop.txt", b"Pressure relief valves protect equipment.", "text/plain")},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "unauthorized"
+
+
+def test_search_without_auth_returns_401() -> None:
+    _override_without_auth(FakeEmbeddingProvider(), FakeVectorStore())
+
+    response = client.post(
+        "/api/v1/documents/search",
+        json={"query": "test", "top_k": 5},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "unauthorized"
 
 
 def test_search_vector_store_unavailable_returns_503() -> None:

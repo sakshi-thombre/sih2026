@@ -1,6 +1,10 @@
 """Document ingestion and search endpoints. Development/prototype API,
 same status as app/api/v1/endpoints/llm.py — not the final agent API.
 
+Requires an authenticated caller (see `get_current_user` in
+app.api.deps) — same Supabase-JWT dependency the /agent routes use, no
+second auth system.
+
 Routes stay thin: read/validate the request, delegate to
 app.services.rag_service, return the response. No extraction, chunking,
 embedding, or vector-search logic lives here.
@@ -8,7 +12,7 @@ embedding, or vector-search logic lives here.
 
 from fastapi import APIRouter, Depends, UploadFile
 
-from app.api.deps import get_embedding_provider, get_settings, get_vector_store
+from app.api.deps import get_current_user, get_embedding_provider, get_settings, get_vector_store
 from app.core.config import Settings
 from app.core.exceptions import InvalidDocumentError
 from app.rag.embeddings import EmbeddingProvider
@@ -41,6 +45,7 @@ async def _read_upload(file: UploadFile, max_bytes: int) -> bytes:
 @router.post("/documents/upload", response_model=UploadResponse)
 async def upload_document(
     file: UploadFile,
+    user: dict[str, str] = Depends(get_current_user),
     settings: Settings = Depends(get_settings),
     embedding_provider: EmbeddingProvider = Depends(get_embedding_provider),
     vector_store: VectorStore = Depends(get_vector_store),
@@ -64,6 +69,7 @@ async def upload_document(
 @router.post("/documents/search", response_model=SearchResponse)
 async def search(
     request: SearchRequest,
+    user: dict[str, str] = Depends(get_current_user),
     embedding_provider: EmbeddingProvider = Depends(get_embedding_provider),
     vector_store: VectorStore = Depends(get_vector_store),
 ) -> SearchResponse:
