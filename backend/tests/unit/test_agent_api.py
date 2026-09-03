@@ -14,6 +14,8 @@ from app.api.deps import (
     get_agent_client,
     get_current_user,
     get_run_store,
+    get_service_action_store,
+    get_service_run_store,
     get_tool_registry,
     verify_internal_service,
 )
@@ -71,6 +73,8 @@ def teardown_function() -> None:
     app.dependency_overrides.pop(get_current_user, None)
     app.dependency_overrides.pop(get_run_store, None)
     app.dependency_overrides.pop(get_action_store, None)
+    app.dependency_overrides.pop(get_service_run_store, None)
+    app.dependency_overrides.pop(get_service_action_store, None)
     app.dependency_overrides.pop(get_agent_client, None)
     app.dependency_overrides.pop(get_tool_registry, None)
     app.dependency_overrides.pop(verify_internal_service, None)
@@ -82,6 +86,13 @@ def _override(agent_client: AgentClient, role: str = "engineer") -> tuple[InMemo
     app.dependency_overrides[get_current_user] = lambda: {"user_id": "user-1", "role": role}
     app.dependency_overrides[get_run_store] = lambda: run_store
     app.dependency_overrides[get_action_store] = lambda: action_store
+    # /tools/execute (called by Person C's service, not the frontend)
+    # depends on the service-scoped stores instead — see
+    # app.api.deps.get_service_run_store. Point them at the same fakes
+    # so the two paths share state in tests, mirroring how in
+    # production both are really just the same agent_action_logs table.
+    app.dependency_overrides[get_service_run_store] = lambda: run_store
+    app.dependency_overrides[get_service_action_store] = lambda: action_store
     app.dependency_overrides[get_agent_client] = lambda: agent_client
     registry = ToolRegistry()
     registry.register(EchoTool())
@@ -115,13 +126,14 @@ def test_create_run_without_auth_fails_closed() -> None:
     app.dependency_overrides[get_run_store] = lambda: run_store
     app.dependency_overrides[get_action_store] = lambda: action_store
     app.dependency_overrides[get_agent_client] = lambda: FakeAgentClient(result=success_result())
-    # get_current_user intentionally NOT overridden — real placeholder raises
-    # NotImplementedError, and TestClient re-raises server exceptions by
-    # default rather than turning them into an HTTP response. Either way,
-    # no run is silently created without an authenticated user.
-    with pytest.raises(NotImplementedError):
-        client.post("/api/v1/agent/runs", json={"task": "do something"})
+    # get_current_user intentionally NOT overridden — with no Authorization
+    # header, its get_bearer_token dependency raises UnauthorizedError before
+    # any Supabase call is attempted, and the app's exception handler turns
+    # that into a clean 401 rather than creating a run.
+    response = client.post("/api/v1/agent/runs", json={"task": "do something"})
 
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "unauthorized"
     assert run_store._runs == {}  # nothing was created
 
 

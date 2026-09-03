@@ -49,6 +49,16 @@ class PermissionDeniedError(AppError):
     code = "permission_denied"
 
 
+class UnauthorizedError(AppError):
+    """Raised when a request has no valid authenticated identity at all:
+    missing/malformed Authorization header, or a token Supabase rejects
+    as invalid/expired. Distinct from `PermissionDeniedError`, which is
+    for a valid, authenticated identity that lacks a required role."""
+
+    status_code = 401
+    code = "unauthorized"
+
+
 class UpstreamServiceError(AppError):
     """Raised when a dependency (e.g. Ollama) responds, but with something
     malformed or unexpected — as opposed to being unreachable entirely."""

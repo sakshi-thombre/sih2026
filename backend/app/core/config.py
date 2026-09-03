@@ -16,6 +16,22 @@ class Settings(BaseSettings):
     # .env once the connection details and schema are finalized.
     database_url: str | None = None
 
+    # Supabase project the backend talks to via PostgREST (through the
+    # supabase-py client), not a direct Postgres connection — see
+    # app/db/session.py. `supabase_anon_key` is used for every
+    # user-facing request, paired with the caller's own JWT, so
+    # existing Row Level Security policies apply exactly as they would
+    # for a direct Supabase client.
+    supabase_url: str | None = None
+    supabase_anon_key: str | None = None
+    # Bypasses RLS entirely — must NEVER be used for a request made on
+    # behalf of an end user. Its only sanctioned use is
+    # app.db.session.get_service_db, which backs the one endpoint
+    # Person C's agent service calls with no user session to preserve
+    # (POST /api/v1/agent/tools/execute, gated instead by
+    # verify_internal_service).
+    supabase_service_role_key: str | None = None
+
     # Declared now so the config surface is stable, but not read by any
     # code yet. The LLM provider (Phase 3) and RAG pipeline (Phase 4) will
     # consume these once implemented.

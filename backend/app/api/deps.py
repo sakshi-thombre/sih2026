@@ -1,11 +1,12 @@
 """Shared FastAPI dependencies.
 
-`get_current_user` is a placeholder. Person D owns authentication —
-once they implement it, this function should be replaced with real
-token/session verification. Every endpoint that needs an authenticated
-user should depend on this function (or `require_role` in
+`get_current_user` validates the caller's Supabase JWT (via
+`db.auth.get_user`, i.e. Supabase's own Auth server — no local JWT
+secret/JWKS handling here) and loads their role/unit from
+`user_profiles`. Every endpoint that needs an authenticated user
+should depend on this function (or `require_role` in
 `app.security.permissions`) rather than reading headers directly, so
-there is exactly one place to wire in the real implementation.
+there is exactly one place authentication is wired in.
 
 `get_llm_provider` is the single wiring point between the API layer
 and whichever LLMProvider is configured.
@@ -14,17 +15,20 @@ and whichever LLMProvider is configured.
 import secrets
 from functools import lru_cache
 
-from fastapi import Header
+from fastapi import Depends, Header
+from supabase import AsyncClient
 
 from app.clients.agent_client import AgentClient, HttpAgentClient
 from app.core.config import Settings, settings
-from app.core.exceptions import PermissionDeniedError
+from app.core.exceptions import PermissionDeniedError, ServiceUnavailableError, UnauthorizedError
+from app.db.session import get_bearer_token, get_db, get_service_db
 from app.llm.base import LLMProvider
 from app.llm.ollama import OllamaProvider
 from app.rag.embeddings import EmbeddingProvider, OllamaEmbeddingProvider
 from app.rag.retriever import VectorStoreRetriever
 from app.rag.vector_store import LocalVectorStore, VectorStore
-from app.runs.store import ActionStore, InMemoryActionStore, InMemoryRunStore, RunStore
+from app.runs.store import ActionStore, RunStore
+from app.runs.supabase_store import SupabaseActionStore, SupabaseRunStore
 from app.tools.base import ToolRegistry
 from app.tools.document_search_tool import DocumentSearchTool
 
@@ -73,13 +77,52 @@ def get_vector_store() -> VectorStore:
     return LocalVectorStore(settings.vector_store_path)
 
 
-def get_current_user() -> dict[str, str]:
-    """Placeholder for authentication.
+async def get_current_user(
+    token: str = Depends(get_bearer_token),
+    db: AsyncClient = Depends(get_db),
+) -> dict[str, str]:
+    """Validates the bearer token against Supabase Auth and loads the
+    caller's role/unit from `user_profiles`. Deliberately does not
+    decode/verify the JWT locally — `db.auth.get_user` asks Supabase's
+    own Auth server to do that, so this works regardless of whether
+    the project signs tokens with a shared secret or asymmetric keys,
+    and there's no JWT secret to manage/rotate here.
 
-    Person D will replace this with real auth (e.g. verifying a JWT or
-    Supabase session and loading the user + role from the database).
+    The `user_profiles` lookup goes through `db`, which is already
+    scoped to `token` (see `get_db`), so it is itself subject to the
+    `profiles_select` RLS policy — a user can only ever load their own
+    profile this way, never impersonate another `user_id`.
     """
-    raise NotImplementedError("Authentication is not yet implemented")
+    try:
+        auth_response = await db.auth.get_user(token)
+    except Exception as exc:
+        raise UnauthorizedError("Invalid or expired authentication token") from exc
+
+    user = auth_response.user if auth_response is not None else None
+    if user is None:
+        raise UnauthorizedError("Invalid or expired authentication token")
+
+    try:
+        profile_response = await (
+            db.table("user_profiles")
+            .select("id, full_name, role, unit_id")
+            .eq("id", user.id)
+            .maybe_single()
+            .execute()
+        )
+    except Exception as exc:
+        raise ServiceUnavailableError("Could not load user profile from Supabase") from exc
+
+    profile = profile_response.data if profile_response is not None else None
+    if profile is None:
+        raise UnauthorizedError("No user profile exists for this account")
+
+    return {
+        "user_id": profile["id"],
+        "role": profile["role"],
+        "unit_id": profile.get("unit_id") or "",
+        "full_name": profile.get("full_name") or "",
+    }
 
 
 @lru_cache
@@ -92,19 +135,34 @@ def get_agent_client() -> AgentClient:
     )
 
 
-@lru_cache
-def get_run_store() -> RunStore:
-    """In-memory prototype store for agent runs (Phase 4). Person D can
-    swap this for a PostgreSQL-backed `RunStore` later — routes and
-    services depend only on the `RunStore` interface."""
-    return InMemoryRunStore()
+def get_run_store(db: AsyncClient = Depends(get_db)) -> RunStore:
+    """Supabase-backed store for agent runs, scoped to the calling
+    user's own JWT so the `agent_action_logs` RLS policies (own row, or
+    manager) enforce who can read/update which run. Not cached — unlike
+    `get_llm_provider`, `db` differs per request/per user."""
+    return SupabaseRunStore(db)
 
 
-@lru_cache
-def get_action_store() -> ActionStore:
-    """In-memory prototype store for run action/audit records, backing
-    GET /api/v1/agent/runs/{run_id}/actions."""
-    return InMemoryActionStore()
+def get_action_store(db: AsyncClient = Depends(get_db)) -> ActionStore:
+    """Supabase-backed store for run action/audit records, backing
+    GET /api/v1/agent/runs/{run_id}/actions. Same per-request, user-
+    scoped client as `get_run_store`."""
+    return SupabaseActionStore(db)
+
+
+def get_service_run_store(db: AsyncClient = Depends(get_service_db)) -> RunStore:
+    """For POST /api/v1/agent/tools/execute only, which is
+    authenticated as Person C's service via `verify_internal_service`
+    rather than an end user — there is no user JWT to scope Supabase
+    queries by, so this uses the service-role client instead. Must
+    never be depended on by a route the frontend calls."""
+    return SupabaseRunStore(db)
+
+
+def get_service_action_store(db: AsyncClient = Depends(get_service_db)) -> ActionStore:
+    """Service-role counterpart to `get_action_store` — see
+    `get_service_run_store`."""
+    return SupabaseActionStore(db)
 
 
 @lru_cache
