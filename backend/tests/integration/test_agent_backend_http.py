@@ -70,7 +70,12 @@ def _ollama_stub() -> FastAPI:
     async def generate(body: dict):
         calls["count"] += 1
         prompt = body.get("prompt", "")
-        if "FINAL ANSWER" in prompt:
+        # FINAL_ANSWER_PROMPT (agent-service/app/prompts.py) has no literal
+        # "FINAL ANSWER" text — it's only ever referred to in lowercase —
+        # but it does uniquely include a "TOOL RESULTS:" header that
+        # PLANNER_PROMPT never has, so that's the reliable way to tell the
+        # two Ollama calls apart from this stub.
+        if "TOOL RESULTS" in prompt:
             response = "Integration test answer"
         else:
             response = '{"steps":[{"step":1,"tool":"echo","description":"hello integration"}]}'
@@ -117,7 +122,7 @@ def test_agent_run_reaches_real_backend_tool_gateway(tmp_path: Path) -> None:
     env = os.environ.copy()
     env.update(
         {
-            "PYTHONPATH": str(Path(__file__).parents[2] / "agent-service"),
+            "PYTHONPATH": str(Path(__file__).parents[3] / "agent-service"),
             "BACKEND_BASE_URL": f"http://127.0.0.1:{backend_port}",
             "INTERNAL_SERVICE_TOKEN": "integration-secret",
             "OLLAMA_BASE_URL": f"http://127.0.0.1:{ollama_port}",
@@ -131,7 +136,7 @@ def test_agent_run_reaches_real_backend_tool_gateway(tmp_path: Path) -> None:
     settings.internal_service_token = "integration-secret"
 
     try:
-        agent_dir = Path(__file__).parents[2] / "agent-service"
+        agent_dir = Path(__file__).parents[3] / "agent-service"
         proc = subprocess.Popen(
             [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(_free_port())],
             cwd=agent_dir,
