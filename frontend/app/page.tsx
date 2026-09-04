@@ -15,45 +15,35 @@ import {
   ListChecks,
   Wrench,
   BookOpen,
+  XCircle,
+  Upload,
+  WifiOff,
+  LogIn,
 } from 'lucide-react';
-import { createRun, getRun, type AgentRun } from './mockAgentClient';
-
-// ---------------------------------------------------------------------------
-// DEMO_MODE: the backend team's auth + real agent API aren't wired up yet
-// (see FRONTEND_API_REQUIREMENTS.md — /agent/runs currently always errors
-// because auth isn't implemented). Until that lands, this screen runs
-// entirely against `mockAgentClient.ts` so the rest of the team has a
-// working, presentable UI to build against.
-//
-// To go live later: set DEMO_MODE to false, and swap `runMockTask` below
-// for a real fetch to POST /api/v1/agent/runs + polling GET .../status.
-// The `AgentRun` shape already matches the documented API contract, so the
-// rest of this component shouldn't need to change.
-// ---------------------------------------------------------------------------
-const DEMO_MODE = true;
+import {
+  createRun,
+  getRun,
+  getRunStatus,
+  cancelRun,
+  getRunActions,
+  ApiError,
+  TERMINAL_STATUSES,
+  type AgentRun,
+  type RunAction,
+} from '@/lib/agentClient';
+import { uploadDocument, searchDocuments, type SearchResult } from '@/lib/documentsClient';
 
 type Role = 'Plant Manager' | 'Safety Officer';
 
-export interface TaskRecord {
-  id: string;
-  title: string;
-  unit: string;
-  restrictedToRole: Role | 'All';
-  status: 'In Progress' | 'Completed' | 'Pending';
-}
-
-const MOCK_PROJECTS: TaskRecord[] = Array.from({ length: 24 }, (_, i) => ({
-  id: `PROJ-${1000 + i}`,
-  title:
-    i % 3 === 0
-      ? `Unit ${(i % 5) + 1} pressure anomaly analysis`
-      : i % 3 === 1
-        ? `Unit ${(i % 5) + 1} SOP compliance review`
-        : `Unit ${(i % 5) + 1} pre-startup checklist`,
-  unit: `Unit ${(i % 5) + 1}`,
-  restrictedToRole: i % 3 === 0 ? 'Plant Manager' : i % 2 === 0 ? 'Safety Officer' : 'All',
-  status: i % 4 === 0 ? 'In Progress' : i % 7 === 0 ? 'Pending' : 'Completed',
-}));
+type UIState =
+  | 'idle'
+  | 'submitting'
+  | 'polling'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'backend_unavailable'
+  | 'auth_failed';
 
 const QUICK_TASKS = [
   {
@@ -73,46 +63,45 @@ const QUICK_TASKS = [
   },
 ];
 
-function deriveSteps(run: AgentRun | null) {
-  const steps = [
-    { id: 1, label: 'Plan & search', detail: 'Breaking the task into steps and querying internal sources.' },
-    { id: 2, label: 'Cross-reference sources', detail: 'Matching findings against SOPs and manuals.' },
-    { id: 3, label: 'Generate report', detail: 'Synthesizing the final answer with citations.' },
-  ] as const;
+const POLL_INTERVAL_MS = 1500;
 
-  return steps.map((step) => {
-    let status: 'pending' | 'running' | 'completed' = 'pending';
-    if (run) {
-      const planReady = run.tools_used.length > 0;
-      const sourcesReady = run.sources.length > 0;
-      const answerReady = run.answer !== null;
+function sourceLabel(source: Record<string, unknown>): string {
+  const title = source.title ?? source.document ?? source.filename ?? source.name;
+  const location = source.location ?? source.page ?? source.section;
+  if (title && location) return `${String(title)} — ${String(location)}`;
+  if (title) return String(title);
+  return JSON.stringify(source);
+}
 
-      if (step.id === 1) status = answerReady || planReady ? 'completed' : run.status === 'running' || run.status === 'queued' ? 'running' : 'pending';
-      if (step.id === 2) status = answerReady || sourcesReady ? 'completed' : planReady ? 'running' : 'pending';
-      if (step.id === 3) status = answerReady ? 'completed' : sourcesReady ? 'running' : 'pending';
-    }
-    return { ...step, status };
-  });
+function resultLocation(result: SearchResult): string {
+  const parts: string[] = [];
+  if (result.page_number != null) parts.push(`page ${result.page_number}`);
+  parts.push(`chunk ${result.chunk_index}`);
+  parts.push(`score ${result.score.toFixed(2)}`);
+  return parts.join(' · ');
 }
 
 export default function Workbench() {
-  const [activeTab, setActiveTab] = useState<'templates' | 'input' | 'progress'>('input');
+  const [activeTab, setActiveTab] = useState<'templates' | 'input' | 'progress' | 'documents'>('input');
   const [taskInput, setTaskInput] = useState('');
   const [selectedRole, setSelectedRole] = useState<Role>('Plant Manager');
   const [isLogOpen, setIsLogOpen] = useState(false);
   const [copied, setCopied] = useState(false);
 
   const [run, setRun] = useState<AgentRun | null>(null);
+  const [uiState, setUiState] = useState<UIState>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [actions, setActions] = useState<RunAction[]>([]);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const isExecuting = run !== null && (run.status === 'queued' || run.status === 'running');
-  const steps = deriveSteps(run);
-
-  const visibleProjects = MOCK_PROJECTS.filter((proj) => {
-    if (selectedRole === 'Plant Manager') return true;
-    return proj.restrictedToRole === 'All' || proj.restrictedToRole === 'Safety Officer';
-  });
+  // --- Documents tab state ---
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadStatus, setUploadStatus] = useState<'idle' | 'uploading' | 'done' | 'error'>('idle');
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [searchStatus, setSearchStatus] = useState<'idle' | 'searching' | 'done' | 'error'>('idle');
+  const [searchError, setSearchError] = useState<string | null>(null);
 
   useEffect(() => {
     return () => {
@@ -120,50 +109,97 @@ export default function Workbench() {
     };
   }, []);
 
-  async function getAccessToken(): Promise<string> {
-    if (DEMO_MODE) return 'demo-mock-token';
-    // Loaded dynamically so a missing/unconfigured @/lib/supabase never
-    // breaks the build while DEMO_MODE is on.
-    const { supabase } = await import('@/lib/supabase');
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
-    if (!session) throw new Error('Authentication required. Please log in to run tasks.');
-    return session.access_token;
+  function stopPolling() {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }
+
+  function handleApiError(err: unknown): void {
+    if (err instanceof ApiError) {
+      if (err.status === 401 || err.code === 'not_authenticated') {
+        setUiState('auth_failed');
+        setErrorMessage('You need to be signed in to run tasks.');
+      } else if (err.status === 0 || err.code === 'backend_unavailable') {
+        setUiState('backend_unavailable');
+        setErrorMessage(err.message);
+      } else {
+        setUiState('failed');
+        setErrorMessage(err.message);
+      }
+    } else {
+      setUiState('failed');
+      setErrorMessage(err instanceof Error ? err.message : 'An unexpected error occurred.');
+    }
   }
 
   async function handleRunTask() {
-    if (!taskInput.trim() || isExecuting) return;
+    if (!taskInput.trim() || uiState === 'submitting' || uiState === 'polling') return;
 
     setErrorMessage(null);
     setRun(null);
-    setIsLogOpen(true);
+    setActions([]);
     setCopied(false);
+    setIsLogOpen(true);
+    setUiState('submitting');
 
     try {
-      await getAccessToken(); // will throw in non-demo mode if not logged in
+      const started = await createRun(taskInput, { role: selectedRole });
+      setRun({
+        run_id: started.run_id,
+        status: started.status,
+        task: taskInput,
+        answer: null,
+        plan_summary: null,
+        tools_used: null,
+        sources: null,
+        error_code: null,
+        error_message: null,
+      });
+      setUiState('polling');
 
-      const started = DEMO_MODE
-        ? createRun(taskInput, selectedRole)
-        : null; // real API call goes here once DEMO_MODE is false
+      pollRef.current = setInterval(async () => {
+        try {
+          const statusRes = await getRunStatus(started.run_id);
+          setRun((prev) => (prev ? { ...prev, status: statusRes.status } : prev));
 
-      if (!started) throw new Error('Real backend integration not wired up yet.');
-      setRun(started);
+          // Best-effort — the actions endpoint may briefly 404 before the
+          // run starts producing events, so failures here don't stop polling.
+          getRunActions(started.run_id)
+            .then(setActions)
+            .catch(() => { });
 
-      if (pollRef.current) clearInterval(pollRef.current);
-      pollRef.current = setInterval(() => {
-        const latest = getRun(started.run_id);
-        if (!latest) return;
-        setRun(latest);
-        if (latest.status === 'completed' || latest.status === 'failed') {
-          if (pollRef.current) clearInterval(pollRef.current);
-          if (latest.status === 'failed') {
-            setErrorMessage(latest.error_message ?? 'The task failed to complete.');
+          if (TERMINAL_STATUSES.includes(statusRes.status)) {
+            stopPolling();
+            const full = await getRun(started.run_id);
+            setRun(full);
+            setUiState(
+              full.status === 'completed' ? 'completed' : full.status === 'cancelled' ? 'cancelled' : 'failed'
+            );
+            if (full.error_message) setErrorMessage(full.error_message);
           }
+        } catch (err) {
+          stopPolling();
+          handleApiError(err);
         }
-      }, 400);
+      }, POLL_INTERVAL_MS);
     } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : 'An error occurred while executing the task.');
+      handleApiError(err);
+    }
+  }
+
+  async function handleCancel() {
+    if (!run) return;
+    try {
+      const res = await cancelRun(run.run_id);
+      setRun((prev) => (prev ? { ...prev, status: res.status } : prev));
+      if (TERMINAL_STATUSES.includes(res.status)) {
+        stopPolling();
+        setUiState('cancelled');
+      }
+    } catch (err) {
+      handleApiError(err);
     }
   }
 
@@ -175,14 +211,37 @@ export default function Workbench() {
     });
   }
 
+  async function handleUpload() {
+    if (!uploadFile) return;
+    setUploadStatus('uploading');
+    setUploadError(null);
+    try {
+      await uploadDocument(uploadFile);
+      setUploadStatus('done');
+    } catch (err) {
+      setUploadStatus('error');
+      setUploadError(err instanceof ApiError ? err.message : 'Upload failed.');
+    }
+  }
+
+  async function handleSearch() {
+    if (!searchQuery.trim()) return;
+    setSearchStatus('searching');
+    setSearchError(null);
+    try {
+      const results = await searchDocuments(searchQuery);
+      setSearchResults(results);
+      setSearchStatus('done');
+    } catch (err) {
+      setSearchStatus('error');
+      setSearchError(err instanceof ApiError ? err.message : 'Search failed.');
+    }
+  }
+
+  const isBusy = uiState === 'submitting' || uiState === 'polling';
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col font-sans relative overflow-x-hidden">
-      {DEMO_MODE && (
-        <div className="bg-amber-50 border-b border-amber-200 text-amber-800 text-xs text-center py-1.5 px-4">
-          Demo mode — running against a simulated backend. Timings and report content are illustrative.
-        </div>
-      )}
-
       {/* Top Navigation Bar */}
       <header className="flex items-center justify-between px-6 py-4 bg-white/80 backdrop-blur-md border-b border-slate-200 sticky top-0 z-10">
         <div className="flex items-center gap-3">
@@ -212,7 +271,8 @@ export default function Workbench() {
           {([
             ['templates', 'Task templates'],
             ['input', 'New task'],
-            ['progress', `Project progress (${visibleProjects.length})`],
+            ['documents', 'Documents'],
+            ['progress', 'Project progress'],
           ] as const).map(([key, label]) => (
             <button
               key={key}
@@ -228,7 +288,6 @@ export default function Workbench() {
         </nav>
       </div>
 
-      {/* Main Content Area */}
       <main className="flex-1 p-8 max-w-5xl w-full mx-auto space-y-8">
         {activeTab === 'input' && (
           <>
@@ -248,23 +307,31 @@ export default function Workbench() {
                 </div>
                 <button
                   onClick={handleRunTask}
-                  disabled={isExecuting || !taskInput.trim()}
+                  disabled={isBusy || !taskInput.trim()}
                   className="flex items-center gap-2 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-400 text-white font-medium text-sm px-6 py-3 rounded-xl shadow transition active:scale-95 whitespace-nowrap cursor-pointer disabled:cursor-not-allowed"
                 >
-                  {isExecuting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4 fill-current" />}
-                  {isExecuting ? 'Running…' : 'Run task'}
+                  {isBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4 fill-current" />}
+                  {isBusy ? 'Running…' : 'Run task'}
                 </button>
+                {uiState === 'polling' && (
+                  <button
+                    onClick={handleCancel}
+                    className="flex items-center gap-1.5 text-xs font-medium text-red-600 hover:text-red-700 px-3 py-3 whitespace-nowrap"
+                  >
+                    <XCircle className="w-4 h-4" />
+                    Cancel
+                  </button>
+                )}
               </div>
             </div>
 
-            {/* Output & Report View */}
             <div className="bg-white/80 backdrop-blur-sm border border-slate-200 rounded-2xl p-6 shadow-sm space-y-4">
               <div className="flex items-center justify-between border-b border-slate-100 pb-3">
                 <div className="flex items-center gap-2 text-slate-700 font-semibold">
                   <FileText className="w-5 h-5 text-slate-500" />
                   <span>Generated report</span>
                 </div>
-                {run?.status === 'completed' && run.answer && (
+                {uiState === 'completed' && run?.answer && (
                   <button
                     onClick={handleCopyReport}
                     className="flex items-center gap-1.5 text-xs font-medium text-slate-500 hover:text-slate-800 transition"
@@ -276,22 +343,35 @@ export default function Workbench() {
               </div>
 
               <div className="p-6 bg-slate-50 rounded-xl border border-slate-100 min-h-[220px] text-slate-600 text-sm leading-relaxed">
-                {errorMessage ? (
+                {uiState === 'backend_unavailable' ? (
+                  <div className="flex items-center gap-2 text-red-600">
+                    <WifiOff className="w-5 h-5 shrink-0" />
+                    <span>{errorMessage ?? 'Could not reach the backend. Confirm it is running.'}</span>
+                  </div>
+                ) : uiState === 'auth_failed' ? (
+                  <div className="flex items-center gap-2 text-amber-700">
+                    <LogIn className="w-5 h-5 shrink-0" />
+                    <span>{errorMessage ?? 'Please sign in to run tasks.'}</span>
+                  </div>
+                ) : uiState === 'failed' ? (
                   <div className="flex items-center gap-2 text-red-600">
                     <AlertCircle className="w-5 h-5 shrink-0" />
-                    <span>{errorMessage}</span>
+                    <span>{errorMessage ?? run?.error_message ?? 'The task failed.'}</span>
                   </div>
-                ) : isExecuting ? (
+                ) : uiState === 'cancelled' ? (
+                  <div className="flex items-center gap-2 text-slate-500">
+                    <XCircle className="w-5 h-5 shrink-0" />
+                    <span>Task cancelled.</span>
+                  </div>
+                ) : isBusy ? (
                   <div className="flex items-center justify-center h-40 gap-3 text-slate-500">
                     <Loader2 className="w-5 h-5 animate-spin" />
-                    <span>Running the agent pipeline…</span>
+                    <span>{run?.status ? `Status: ${run.status}…` : 'Submitting task…'}</span>
                   </div>
-                ) : run?.status === 'completed' && run.answer ? (
+                ) : uiState === 'completed' && run?.answer ? (
                   <div className="space-y-5">
                     <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
                       <span>Run {run.run_id.slice(0, 8)}</span>
-                      <span>·</span>
-                      <span>{run.role}</span>
                       {run.completed_at && (
                         <>
                           <span>·</span>
@@ -308,7 +388,32 @@ export default function Workbench() {
                       ))}
                     </div>
 
-                    {run.tools_used.length > 0 && (
+                    {run.plan_summary &&
+                      (Array.isArray(run.plan_summary)
+                        ? run.plan_summary.length > 0
+                        : run.plan_summary.trim().length > 0) && (
+                        <div className="pt-3 border-t border-slate-200 space-y-1.5">
+                          <div className="flex items-center gap-1.5 text-xs font-medium text-slate-500">
+                            <ListChecks className="w-3.5 h-3.5" />
+                            Plan
+                          </div>
+                          {Array.isArray(run.plan_summary) ? (
+                            <ol className="list-decimal list-inside space-y-1">
+                              {run.plan_summary.map((step, i) => (
+                                <li key={i} className="text-xs text-slate-500">
+                                  {step}
+                                </li>
+                              ))}
+                            </ol>
+                          ) : (
+                            <p className="text-xs text-slate-500 whitespace-pre-line">
+                              {run.plan_summary}
+                            </p>
+                          )}
+                        </div>
+                      )}
+
+                    {!!run.tools_used?.length && (
                       <div className="flex flex-wrap gap-2 pt-1">
                         {run.tools_used.map((tool) => (
                           <span
@@ -322,7 +427,7 @@ export default function Workbench() {
                       </div>
                     )}
 
-                    {run.sources.length > 0 && (
+                    {!!run.sources?.length && (
                       <div className="pt-3 border-t border-slate-200 space-y-1.5">
                         <div className="flex items-center gap-1.5 text-xs font-medium text-slate-500">
                           <BookOpen className="w-3.5 h-3.5" />
@@ -331,8 +436,7 @@ export default function Workbench() {
                         <ul className="space-y-1">
                           {run.sources.map((s, i) => (
                             <li key={i} className="text-xs text-slate-500">
-                              {s.title}
-                              <span className="text-slate-400"> — {s.location}</span>
+                              {sourceLabel(s)}
                             </li>
                           ))}
                         </ul>
@@ -365,43 +469,86 @@ export default function Workbench() {
           </div>
         )}
 
-        {activeTab === 'progress' && (
-          <div className="bg-white p-6 rounded-xl border border-slate-200 space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="font-semibold text-slate-800">Active & historical projects</h3>
-                <p className="text-xs text-slate-500">
-                  Showing projects visible to <strong>{selectedRole}</strong>
-                </p>
+        {activeTab === 'documents' && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-3">
+              <div className="flex items-center gap-2 text-slate-700 font-semibold">
+                <Upload className="w-4 h-4 text-slate-500" />
+                Upload a document
               </div>
-              <span className="text-xs bg-slate-100 text-slate-600 px-3 py-1 rounded-full">
-                {visibleProjects.length} of {MOCK_PROJECTS.length} projects
-              </span>
+              <input
+                type="file"
+                onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
+                className="text-xs w-full"
+              />
+              <button
+                onClick={handleUpload}
+                disabled={!uploadFile || uploadStatus === 'uploading'}
+                className="text-xs font-medium bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 text-white px-4 py-2 rounded-lg transition"
+              >
+                {uploadStatus === 'uploading' ? 'Uploading…' : 'Upload'}
+              </button>
+              {uploadStatus === 'done' && (
+                <p className="text-xs text-emerald-600 flex items-center gap-1">
+                  <CheckCircle2 className="w-3.5 h-3.5" /> Uploaded.
+                </p>
+              )}
+              {uploadStatus === 'error' && (
+                <p className="text-xs text-red-600 flex items-center gap-1">
+                  <AlertCircle className="w-3.5 h-3.5" /> {uploadError}
+                </p>
+              )}
             </div>
 
-            <div className="divide-y divide-slate-100 max-h-[350px] overflow-y-auto">
-              {visibleProjects.map((proj) => (
-                <div key={proj.id} className="py-3 flex items-center justify-between text-xs">
-                  <div>
-                    <span className="font-mono text-slate-400 mr-3">{proj.id}</span>
-                    <span className="font-medium text-slate-800">{proj.title}</span>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className="text-slate-400">{proj.unit}</span>
-                    <span
-                      className={`px-2 py-0.5 rounded text-[10px] font-medium ${proj.status === 'Completed'
-                        ? 'bg-emerald-100 text-emerald-800'
-                        : proj.status === 'In Progress'
-                          ? 'bg-amber-100 text-amber-800'
-                          : 'bg-slate-100 text-slate-500'
-                        }`}
-                    >
-                      {proj.status}
-                    </span>
-                  </div>
-                </div>
-              ))}
+            <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-3">
+              <div className="flex items-center gap-2 text-slate-700 font-semibold">
+                <Search className="w-4 h-4 text-slate-500" />
+                Search documents
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+                  placeholder="Search indexed documents…"
+                  className="flex-1 text-xs px-3 py-2 rounded-lg border border-slate-300"
+                />
+                <button
+                  onClick={handleSearch}
+                  disabled={!searchQuery.trim() || searchStatus === 'searching'}
+                  className="text-xs font-medium bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 text-white px-4 py-2 rounded-lg transition"
+                >
+                  {searchStatus === 'searching' ? '…' : 'Search'}
+                </button>
+              </div>
+              {searchStatus === 'error' && (
+                <p className="text-xs text-red-600 flex items-center gap-1">
+                  <AlertCircle className="w-3.5 h-3.5" /> {searchError}
+                </p>
+              )}
+              {searchStatus === 'done' && (
+                <ul className="space-y-2 max-h-60 overflow-y-auto">
+                  {searchResults.length === 0 && <li className="text-xs text-slate-400">No results.</li>}
+                  {searchResults.map((r) => (
+                    <li key={r.chunk_id} className="text-xs border border-slate-100 rounded-lg p-2 bg-slate-50">
+                      <div className="flex items-center justify-between">
+                        <p className="font-medium text-slate-700">{r.filename}</p>
+                        <span className="text-[10px] text-slate-400">{resultLocation(r)}</span>
+                      </div>
+                      {r.text && <p className="text-slate-500 mt-0.5 line-clamp-2">{r.text}</p>}
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
+          </div>
+        )}
+
+        {activeTab === 'progress' && (
+          <div className="bg-white p-6 rounded-xl border border-slate-200 text-sm text-slate-500">
+            Project progress will connect to a real projects endpoint once one exists — not part of this
+            integration pass.
           </div>
         )}
       </main>
@@ -414,30 +561,36 @@ export default function Workbench() {
         <div className="flex items-center justify-between p-4 border-b border-slate-200">
           <div className="flex items-center gap-2">
             <ListChecks className="w-4 h-4 text-slate-500" />
-            <h3 className="font-semibold text-sm text-slate-800">Agent progress</h3>
+            <h3 className="font-semibold text-sm text-slate-800">Agent actions</h3>
           </div>
           <button onClick={() => setIsLogOpen(false)} className="p-1 rounded-lg hover:bg-slate-100">
             <X className="w-4 h-4 text-slate-500" />
           </button>
         </div>
 
-        <div className="p-4 space-y-4 text-xs">
-          {run ? (
-            steps.map((step) => (
-              <div key={step.id} className="flex items-start gap-3 p-3 bg-slate-50 rounded-lg border border-slate-100">
-                {step.status === 'completed' && <CheckCircle2 className="w-4 h-4 text-emerald-600 mt-0.5 shrink-0" />}
-                {step.status === 'running' && <Loader2 className="w-4 h-4 text-amber-600 mt-0.5 animate-spin shrink-0" />}
-                {step.status === 'pending' && <div className="w-4 h-4 rounded-full border-2 border-slate-300 mt-0.5 shrink-0" />}
+        <div className="p-4 space-y-3 text-xs">
+          {run && (
+            <div className="text-slate-500 pb-2 border-b border-slate-100">
+              Status: <span className="font-medium text-slate-700">{run.status}</span>
+            </div>
+          )}
+          {actions.length > 0 ? (
+            actions.map((a, i) => (
+              <div key={i} className="flex items-start gap-3 p-3 bg-slate-50 rounded-lg border border-slate-100">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 mt-0.5 shrink-0" />
                 <div>
-                  <p className={`font-medium ${step.status === 'running' ? 'text-slate-900' : 'text-slate-700'}`}>
-                    {step.label}
-                  </p>
-                  <p className="text-slate-500 mt-0.5">{step.detail}</p>
+                  <p className="font-medium text-slate-700">{a.event_type}</p>
+                  <p className="text-slate-400 mt-0.5">{new Date(a.timestamp).toLocaleTimeString()}</p>
                 </div>
               </div>
             ))
+          ) : run && !TERMINAL_STATUSES.includes(run.status) ? (
+            <div className="flex items-center gap-2 text-slate-400 p-3">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              Waiting for the first action…
+            </div>
           ) : (
-            <p className="text-slate-400">Run a task to see the agent's plan and progress here.</p>
+            <p className="text-slate-400">Run a task to see the agent&apos;s action trail here.</p>
           )}
         </div>
       </div>
@@ -447,7 +600,7 @@ export default function Workbench() {
           onClick={() => setIsLogOpen(true)}
           className="fixed right-0 top-1/2 -translate-y-1/2 bg-slate-900 text-white text-xs font-semibold py-3 px-1 rounded-l-md shadow-md [writing-mode:vertical-rl] tracking-wider hover:bg-slate-800 transition cursor-pointer"
         >
-          Agent progress
+          Agent actions
         </button>
       )}
     </div>
