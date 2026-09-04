@@ -72,7 +72,7 @@ class Settings(BaseSettings):
     # service this URL points to; the value here is a local-dev
     # placeholder until they publish the real address.
     agent_service_base_url: str = "http://localhost:8100"
-    agent_service_timeout_seconds: float = 30.0
+    agent_service_timeout_seconds: float = 120.0
 
     # Service-to-service auth for endpoints Person C's agent service
     # calls into (currently POST /api/v1/agent/tools/execute, which uses

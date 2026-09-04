@@ -129,3 +129,35 @@ async def test_run_response_with_invalid_status_literal() -> None:
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+@pytest.mark.anyio
+async def test_run_sends_context_and_internal_token() -> None:
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+        captured["json"] = json.loads(request.content)
+        captured["token"] = request.headers.get("x-internal-service-token")
+        return httpx.Response(200, json={"run_id": "run-1", "status": "completed"})
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    agent_client = HttpAgentClient(
+        base_url="http://localhost:8100",
+        timeout_seconds=120.0,
+        internal_service_token="secret",
+        client=client,
+    )
+    await agent_client.run(make_request(context={"unit": "unit-a"}))
+    await client.aclose()
+
+    assert captured["token"] == "secret"
+    assert captured["json"]["context"] == {"unit": "unit-a"}
+
+
+@pytest.mark.anyio
+async def test_run_uses_configured_120_second_timeout() -> None:
+    from app.core.config import settings
+
+    assert settings.agent_service_timeout_seconds == 120.0

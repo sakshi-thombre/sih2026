@@ -31,6 +31,8 @@ from app.runs.store import ActionStore, RunStore
 from app.runs.supabase_store import SupabaseActionStore, SupabaseRunStore
 from app.tools.base import ToolRegistry
 from app.tools.document_search_tool import DocumentSearchTool
+from app.tools.sql_query_tool import SQLQueryTool
+from app.tools.report_generator_tool import ReportGeneratorTool
 
 
 def get_settings() -> Settings:
@@ -132,6 +134,7 @@ def get_agent_client() -> AgentClient:
     return HttpAgentClient(
         base_url=settings.agent_service_base_url,
         timeout_seconds=settings.agent_service_timeout_seconds,
+        internal_service_token=settings.internal_service_token,
     )
 
 
@@ -173,6 +176,8 @@ def get_tool_registry() -> ToolRegistry:
     registry = ToolRegistry()
     retriever = VectorStoreRetriever(get_vector_store(), get_embedding_provider())
     registry.register(DocumentSearchTool(retriever))
+    registry.register(SQLQueryTool())
+    registry.register(ReportGeneratorTool())
     return registry
 
 

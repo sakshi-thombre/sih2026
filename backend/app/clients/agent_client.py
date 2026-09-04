@@ -31,6 +31,7 @@ class HttpAgentClient(AgentClient):
         self,
         base_url: str,
         timeout_seconds: float = 30.0,
+        internal_service_token: str | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         """`client` is an optional injection point for tests (e.g. an
@@ -38,19 +39,23 @@ class HttpAgentClient(AgentClient):
         `OllamaProvider`/`OllamaEmbeddingProvider`."""
         self._base_url = base_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
+        self._internal_service_token = internal_service_token
         self._client = client
 
     async def run(self, request: AgentRunRequest) -> AgentRunResult:
         start = time.monotonic()
         url = f"{self._base_url}/agent/run"
         payload = request.model_dump(mode="json")
+        headers = {}
+        if self._internal_service_token:
+            headers["X-Internal-Service-Token"] = self._internal_service_token
 
         try:
             if self._client is not None:
-                response = await self._client.post(url, json=payload)
+                response = await self._client.post(url, json=payload, headers=headers)
             else:
                 async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
-                    response = await client.post(url, json=payload)
+                    response = await client.post(url, json=payload, headers=headers)
         except httpx.TimeoutException as exc:
             logger.warning("agent_service_timeout", extra={"run_id": request.run_id})
             raise ServiceUnavailableError("Agent service request timed out") from exc
