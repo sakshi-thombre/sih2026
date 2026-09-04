@@ -1,96 +1,72 @@
-import json	
+import json
+from typing import Any
 
+from app.backend_client import BackendToolClient
 from app.ollama_client import OllamaClient
 from app.prompts import PLANNER_PROMPT, FINAL_ANSWER_PROMPT
 from app.schemas import AgentPlan
-from app.tools.document_search import document_search
-from app.tools.sql_query import sql_query
-from app.tools.report_generator import report_generator
 
 
 class Agent:
+    """Reasoning/orchestration layer.
 
-    def __init__(self):
+    Tool execution is deliberately delegated to the backend. This service
+    owns planning and answer generation; the backend owns data access,
+    authorization, auditing, and registered tool execution.
+    """
+
+    def __init__(self, backend_client: BackendToolClient | None = None):
         self.llm = OllamaClient()
+        self.backend = backend_client or BackendToolClient()
 
-    async def create_plan(self, task: str) -> AgentPlan:
-
-        prompt = PLANNER_PROMPT.format(task=task)
-
+    async def create_plan(self, task: str, context: dict[str, Any] | None = None) -> AgentPlan:
+        prompt = PLANNER_PROMPT.format(
+            task=task,
+            context=json.dumps(context or {}, indent=2, sort_keys=True),
+        )
         response = await self.llm.generate(prompt)
-
         try:
             data = json.loads(response)
             return AgentPlan(**data)
-
         except Exception as e:
-            raise ValueError(
-                f"Qwen returned an invalid plan: {response}"
-            ) from e
+            raise ValueError(f"Qwen returned an invalid plan: {response}") from e
 
-    async def execute_plan(self, plan: AgentPlan) -> list:
-
+    async def execute_plan(self, run_id: str, plan: AgentPlan) -> list:
         results = []
-
         for step in plan.steps:
-
-            if step.tool == "document_search":
-
-                result = document_search(
-                    step.description
-                )
-
-            elif step.tool == "sql_query":
-
-                result = sql_query(
-                    step.description
-                )
-
-            elif step.tool == "report_generator":
-
+            tool_input = {"query": step.description}
+            if step.tool == "report_generator":
                 source_data = []
-
                 for previous_result in results:
-
-                    if isinstance(previous_result["result"], list):
-                        source_data.extend(
-                            previous_result["result"]
-                        )
-
-                result = report_generator(
-                    "Agent Generated Report",
-                    source_data
-                )
-
-            else:
-
-                result = {
-                    "error": f"Unknown tool: {step.tool}"
+                    value = previous_result.get("result", {})
+                    if isinstance(value, dict):
+                        value = value.get("data")
+                    if isinstance(value, list):
+                        source_data.extend(value)
+                tool_input = {
+                    "title": "Agent Generated Report",
+                    "data": source_data,
                 }
 
+            response = await self.backend.execute(
+                run_id=run_id,
+                tool_name=step.tool,
+                input_data=tool_input,
+            )
+            result = response.get("data") if response.get("success") else {
+                "error": response.get("error") or "Tool execution failed"
+            }
             results.append({
                 "step": step.step,
                 "tool": step.tool,
                 "description": step.description,
-                "result": result
+                "result": result,
             })
-
         return results
 
-    async def generate_final_answer(
-        self,
-        task: str,
-        results: list
-    ) -> str:
-
+    async def generate_final_answer(self, task: str, results: list) -> str:
         prompt = FINAL_ANSWER_PROMPT.format(
             task=task,
-            results=json.dumps(
-                results,
-                indent=2
-            )
+            results=json.dumps(results, indent=2),
         )
-
-        response = await self.llm.generate(prompt)
-
-        return response
+        return await self.llm.generate(prompt)

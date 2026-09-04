@@ -3,7 +3,7 @@ You are an AI agent planner for a confidential industrial environment.
 
 Your job is to convert the user's task into a sequence of tool calls.
 
-AVAILABLE TOOLS:
+AVAILABLE TOOLS (executed by the backend tool gateway; never execute them locally):
 
 1. document_search
 Use this tool to search internal documents such as:
@@ -68,6 +68,9 @@ The output must follow this structure:
 
 USER TASK:
 {task}
+
+REQUEST CONTEXT (may be empty):
+{context}
 """
 
 

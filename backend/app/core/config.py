@@ -1,6 +1,12 @@
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# The only `environment` value that may run with no internal-service
+# token configured — see `Settings._validate_internal_service_token`.
+# Everything else (staging, production, or any other deployment name)
+# is treated as production-like and must set INTERNAL_SERVICE_TOKEN.
+_DEVELOPMENT_ENVIRONMENT = "development"
+
 
 class Settings(BaseSettings):
     app_name: str = "MRPL AI Workbench"
@@ -15,6 +21,31 @@ class Settings(BaseSettings):
     # Left unset intentionally — the database teammate will set this via
     # .env once the connection details and schema are finalized.
     database_url: str | None = None
+
+    # CORS: origins the frontend is served from, comma-separated (e.g.
+    # "http://localhost:3000,http://localhost:5173" covers the default
+    # Next.js/CRA and Vite dev ports). Never add "*" here — the
+    # frontend sends credentials (the Supabase JWT via Authorization
+    # header), and browsers reject a wildcard origin combined with
+    # credentialed requests. Change per environment via .env; see
+    # `cors_allow_origins` for the parsed list CORSMiddleware uses.
+    frontend_origins: str = "http://localhost:3000,http://localhost:5173"
+
+    # Supabase project the backend talks to via PostgREST (through the
+    # supabase-py client), not a direct Postgres connection — see
+    # app/db/session.py. `supabase_anon_key` is used for every
+    # user-facing request, paired with the caller's own JWT, so
+    # existing Row Level Security policies apply exactly as they would
+    # for a direct Supabase client.
+    supabase_url: str | None = None
+    supabase_anon_key: str | None = None
+    # Bypasses RLS entirely — must NEVER be used for a request made on
+    # behalf of an end user. Its only sanctioned use is
+    # app.db.session.get_service_db, which backs the one endpoint
+    # Person C's agent service calls with no user session to preserve
+    # (POST /api/v1/agent/tools/execute, gated instead by
+    # verify_internal_service).
+    supabase_service_role_key: str | None = None
 
     # Declared now so the config surface is stable, but not read by any
     # code yet. The LLM provider (Phase 3) and RAG pipeline (Phase 4) will
@@ -41,17 +72,31 @@ class Settings(BaseSettings):
     # service this URL points to; the value here is a local-dev
     # placeholder until they publish the real address.
     agent_service_base_url: str = "http://localhost:8100"
-    agent_service_timeout_seconds: float = 30.0
+    agent_service_timeout_seconds: float = 120.0
 
-    # Service-to-service auth placeholder for endpoints Person C's agent
-    # service calls into (e.g. POST /api/v1/agent/tools/execute), as
-    # opposed to endpoints the frontend calls. Left unset by default so
-    # local dev/testing needs no extra setup; when set, callers must
-    # present a matching X-Internal-Service-Token header. Person D owns
-    # the eventual real service-to-service auth mechanism.
+    # Service-to-service auth for endpoints Person C's agent service
+    # calls into (currently POST /api/v1/agent/tools/execute, which uses
+    # the RLS-bypassing service-role Supabase key — see
+    # app.db.session.get_service_db), as opposed to endpoints the
+    # frontend calls. Callers must present a matching
+    # X-Internal-Service-Token header (checked with a constant-time
+    # comparison — see app.api.deps.verify_internal_service). May be
+    # left unset only when ENVIRONMENT=development, so local dev/testing
+    # needs no extra setup; see `_validate_internal_service_token` below,
+    # which fails startup otherwise. Person D owns the eventual
+    # permanent service-to-service auth mechanism.
     internal_service_token: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @property
+    def cors_allow_origins(self) -> list[str]:
+        """Parses `frontend_origins` into the list `CORSMiddleware`
+        expects. A plain comma-separated string (rather than a `list`
+        field) avoids pydantic-settings' JSON-parsing requirement for
+        list-typed env vars, so `.env` can just be
+        `FRONTEND_ORIGINS=http://localhost:3000,http://localhost:5173`."""
+        return [origin.strip() for origin in self.frontend_origins.split(",") if origin.strip()]
 
     @model_validator(mode="after")
     def _validate_rag_settings(self) -> "Settings":
@@ -65,6 +110,27 @@ class Settings(BaseSettings):
             raise ValueError("max_top_k must be positive")
         if self.embedding_batch_size <= 0:
             raise ValueError("embedding_batch_size must be positive")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_internal_service_token(self) -> "Settings":
+        """Fails startup rather than silently running with internal-service
+        auth disabled. Without this, an unset/empty INTERNAL_SERVICE_TOKEN
+        makes `verify_internal_service` a no-op, leaving
+        POST /api/v1/agent/tools/execute (service-role Supabase access,
+        bypassing RLS) reachable by anyone. Development is the one
+        environment allowed to skip this, so local setup needs no extra
+        configuration."""
+        if self.environment != _DEVELOPMENT_ENVIRONMENT and not self.internal_service_token:
+            raise ValueError(
+                "INTERNAL_SERVICE_TOKEN must be set to a non-empty value when "
+                f"ENVIRONMENT is not '{_DEVELOPMENT_ENVIRONMENT}' (got "
+                f"'{self.environment}'). This token guards "
+                "POST /api/v1/agent/tools/execute, which uses the "
+                "RLS-bypassing Supabase service-role key. Set "
+                "INTERNAL_SERVICE_TOKEN in your environment/.env, or set "
+                f"ENVIRONMENT={_DEVELOPMENT_ENVIRONMENT} for local development only."
+            )
         return self
 
 

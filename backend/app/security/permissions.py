@@ -1,10 +1,11 @@
 """Role-based authorization scaffolding.
 
 `require_role` is a dependency factory: `Depends(require_role(Role.MANAGER))`
-on a route will (once auth is wired) reject users without that role.
-It currently depends on `get_current_user`, which raises
-`NotImplementedError` until Person D implements real authentication —
-this is intentional so unauthenticated access fails closed, not open.
+on a route rejects users without that role. It depends on
+`get_current_user`, which validates the caller's Supabase JWT and
+raises `UnauthorizedError`/`ServiceUnavailableError` if that fails —
+so an unauthenticated or misidentified caller never reaches the role
+check at all; access fails closed, not open.
 """
 
 from collections.abc import Callable

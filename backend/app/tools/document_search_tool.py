@@ -26,10 +26,28 @@ class DocumentSearchTool(Tool):
     def __init__(self, retriever: Retriever) -> None:
         self._retriever = retriever
 
-    async def run(self, input_data: BaseModel) -> ToolResult:
+    async def run(self, input_data: BaseModel, *, caller: dict[str, str]) -> ToolResult:
+        """Unit isolation mirrors app.api.v1.endpoints.documents' direct
+        /documents/search: managers search unfiltered, everyone else is
+        confined to their own unit_id and fails safely (rather than
+        falling back to unfiltered) if they don't have one. `caller`
+        comes from the run's trusted record, never from `input_data` —
+        `DocumentSearchInput` has no unit_id field for an agent to set in
+        the first place."""
         assert isinstance(input_data, DocumentSearchInput)
+
+        if caller.get("role") == "manager":
+            unit_id: str | None = None
+        else:
+            unit_id = caller.get("unit_id") or ""
+            if not unit_id:
+                return ToolResult(
+                    success=False,
+                    error="No unit assigned to this account; document search is unavailable",
+                )
+
         try:
-            chunks = await self._retriever.retrieve(input_data.query, input_data.top_k)
+            chunks = await self._retriever.retrieve(input_data.query, input_data.top_k, unit_id=unit_id)
         except ValueError as exc:
             return ToolResult(success=False, error=str(exc))
         except Exception:

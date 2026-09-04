@@ -26,8 +26,15 @@ class Tool(ABC):
     required_role: str | None = None
 
     @abstractmethod
-    async def run(self, input_data: BaseModel) -> ToolResult:
+    async def run(self, input_data: BaseModel, *, caller: dict[str, str]) -> ToolResult:
         """Validate input, perform the action, and return a structured result.
+
+        `caller` is the requesting run's trusted identity (user_id, role,
+        unit_id — see app.runs.models.AgentRun), populated by
+        `tool_execution_service.execute_tool` from the run record, never
+        from tool input. A tool that needs to scope its action (e.g. by
+        unit) must use `caller`, not any field an agent could put in
+        `input_data`.
 
         Implementations must fail safely: catch expected errors and
         return `ToolResult(success=False, error=...)` rather than

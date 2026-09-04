@@ -28,8 +28,12 @@ class VectorStore(ABC):
         """Store chunks alongside their embedding vectors."""
 
     @abstractmethod
-    def search(self, query_embedding: list[float], top_k: int) -> list[DocumentChunk]:
-        """Return the top_k chunks most similar to the query embedding, scored."""
+    def search(
+        self, query_embedding: list[float], top_k: int, unit_id: str | None = None
+    ) -> list[DocumentChunk]:
+        """Return the top_k chunks most similar to the query embedding, scored.
+        If unit_id is given, only chunks stored with a matching unit_id are
+        considered — the enforcement point for unit-scoped document search."""
 
     @abstractmethod
     def delete(self, document_id: str) -> None:
@@ -87,6 +91,7 @@ class LocalVectorStore(VectorStore):
                     "filename": chunk.filename,
                     "chunk_id": chunk.chunk_id,
                     "text": chunk.text,
+                    "unit_id": chunk.unit_id,
                     "page_number": chunk.page_number,
                     "chunk_index": chunk.chunk_index,
                 }
@@ -94,7 +99,9 @@ class LocalVectorStore(VectorStore):
             )
             self._save()
 
-    def search(self, query_embedding: list[float], top_k: int) -> list[DocumentChunk]:
+    def search(
+        self, query_embedding: list[float], top_k: int, unit_id: str | None = None
+    ) -> list[DocumentChunk]:
         if top_k <= 0:
             raise ValueError("top_k must be positive")
 
@@ -102,30 +109,46 @@ class LocalVectorStore(VectorStore):
             if self._vectors.shape[0] == 0:
                 return []
 
+            # Unit isolation is enforced here, before similarity ranking:
+            # candidates are narrowed to the caller's unit (or left
+            # unfiltered when unit_id is None, i.e. a manager searching
+            # across all units) so an out-of-unit chunk can never make it
+            # into the top_k, regardless of how well it scores.
+            if unit_id is not None:
+                candidate_indices = [
+                    i for i, meta in enumerate(self._metadata) if meta.get("unit_id") == unit_id
+                ]
+            else:
+                candidate_indices = list(range(len(self._metadata)))
+            if not candidate_indices:
+                return []
+
             query = np.array(query_embedding, dtype=np.float32)
             query_norm = np.linalg.norm(query)
             if query_norm == 0:
                 return []
 
-            vector_norms = np.linalg.norm(self._vectors, axis=1)
+            candidate_vectors = self._vectors[candidate_indices]
+            vector_norms = np.linalg.norm(candidate_vectors, axis=1)
             denominators = vector_norms * query_norm
             denominators[denominators == 0] = 1e-10
-            similarities = (self._vectors @ query) / denominators
+            similarities = (candidate_vectors @ query) / denominators
 
             k = min(top_k, similarities.shape[0])
-            top_indices = np.argsort(-similarities)[:k]
+            top_local_indices = np.argsort(-similarities)[:k]
 
             return [
                 DocumentChunk(
-                    document_id=self._metadata[idx]["document_id"],
-                    filename=self._metadata[idx]["filename"],
-                    chunk_id=self._metadata[idx]["chunk_id"],
-                    text=self._metadata[idx]["text"],
-                    score=float(similarities[idx]),
-                    page_number=self._metadata[idx].get("page_number"),
-                    chunk_index=self._metadata[idx].get("chunk_index"),
+                    document_id=self._metadata[candidate_indices[local_idx]]["document_id"],
+                    filename=self._metadata[candidate_indices[local_idx]]["filename"],
+                    chunk_id=self._metadata[candidate_indices[local_idx]]["chunk_id"],
+                    text=self._metadata[candidate_indices[local_idx]]["text"],
+                    score=float(similarities[local_idx]),
+                    unit_id=self._metadata[candidate_indices[local_idx]].get("unit_id"),
+                    page_number=self._metadata[candidate_indices[local_idx]].get("page_number"),
+                    chunk_index=self._metadata[candidate_indices[local_idx]].get("chunk_index"),
                 )
-                for idx in top_indices
+                for local_idx in top_local_indices
             ]
 
     def delete(self, document_id: str) -> None:

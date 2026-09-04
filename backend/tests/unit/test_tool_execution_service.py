@@ -21,7 +21,7 @@ class EchoTool(Tool):
     input_schema = EchoInput
     required_role = None
 
-    async def run(self, input_data: BaseModel) -> ToolResult:
+    async def run(self, input_data: BaseModel, *, caller: dict[str, str]) -> ToolResult:
         assert isinstance(input_data, EchoInput)
         return ToolResult(success=True, data={"echoed": input_data.message})
 
@@ -32,7 +32,7 @@ class ManagerOnlyTool(Tool):
     input_schema = EchoInput
     required_role = "manager"
 
-    async def run(self, input_data: BaseModel) -> ToolResult:
+    async def run(self, input_data: BaseModel, *, caller: dict[str, str]) -> ToolResult:
         return ToolResult(success=True, data={"ok": True})
 
 
@@ -42,11 +42,27 @@ class ExplodingTool(Tool):
     input_schema = EchoInput
     required_role = None
 
-    async def run(self, input_data: BaseModel) -> ToolResult:
+    async def run(self, input_data: BaseModel, *, caller: dict[str, str]) -> ToolResult:
         raise RuntimeError("boom")
 
 
-async def _setup(role: str = "engineer") -> tuple[InMemoryRunStore, InMemoryActionStore, ToolRegistry, str]:
+class CallerCapturingTool(Tool):
+    name = "caller_capturing"
+    description = "records the caller context it was invoked with"
+    input_schema = EchoInput
+    required_role = None
+
+    def __init__(self) -> None:
+        self.last_caller: dict[str, str] | None = None
+
+    async def run(self, input_data: BaseModel, *, caller: dict[str, str]) -> ToolResult:
+        self.last_caller = caller
+        return ToolResult(success=True, data={"ok": True})
+
+
+async def _setup(
+    role: str = "engineer", unit_id: str = ""
+) -> tuple[InMemoryRunStore, InMemoryActionStore, ToolRegistry, str]:
     run_store = InMemoryRunStore()
     action_store = InMemoryActionStore()
     registry = ToolRegistry()
@@ -54,7 +70,7 @@ async def _setup(role: str = "engineer") -> tuple[InMemoryRunStore, InMemoryActi
     registry.register(ManagerOnlyTool())
     registry.register(ExplodingTool())
 
-    run = AgentRun(user_id="user-1", role=role, task="test task")
+    run = AgentRun(user_id="user-1", role=role, unit_id=unit_id, task="test task")
     await run_store.create(run)
     return run_store, action_store, registry, run.run_id
 
@@ -200,6 +216,27 @@ async def test_execute_tool_unexpected_exception_is_caught() -> None:
 
     assert result.success is False
     assert "boom" not in (result.error or "")  # raw exception text never leaks
+
+
+@pytest.mark.anyio
+async def test_execute_tool_passes_trusted_caller_from_run_not_input() -> None:
+    """caller is built from the run record (run_store.get), never from
+    tool_input — the propagation path a malicious/careless agent could
+    otherwise use to smuggle in a different unit_id."""
+    run_store, action_store, registry, run_id = await _setup(role="engineer", unit_id="unit-a")
+    tool = CallerCapturingTool()
+    registry.register(tool)
+
+    await execute_tool(
+        run_id=run_id,
+        tool_name="caller_capturing",
+        tool_input={"message": "hi", "unit_id": "unit-b"},  # extra field, must be ignored
+        run_store=run_store,
+        action_store=action_store,
+        tool_registry=registry,
+    )
+
+    assert tool.last_caller == {"user_id": "user-1", "role": "engineer", "unit_id": "unit-a"}
 
 
 @pytest.fixture

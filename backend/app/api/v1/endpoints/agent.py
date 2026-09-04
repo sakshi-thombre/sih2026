@@ -16,6 +16,8 @@ from app.api.deps import (
     get_agent_client,
     get_current_user,
     get_run_store,
+    get_service_action_store,
+    get_service_run_store,
     get_tool_registry,
     verify_internal_service,
 )
@@ -70,6 +72,7 @@ async def create_run(
         context=request.context,
         user_id=user.get("user_id", "unknown"),
         role=user.get("role", ""),
+        unit_id=user.get("unit_id", ""),
         run_store=run_store,
         action_store=action_store,
     )
@@ -138,14 +141,19 @@ async def cancel_run(
 )
 async def execute_tool(
     request: ToolExecuteRequest,
-    run_store: RunStore = Depends(get_run_store),
-    action_store: ActionStore = Depends(get_action_store),
+    run_store: RunStore = Depends(get_service_run_store),
+    action_store: ActionStore = Depends(get_service_action_store),
     tool_registry: ToolRegistry = Depends(get_tool_registry),
 ) -> ToolExecuteResponse:
     """Called by Person C's agent service, not the frontend. The agent
     process never executes a tool directly — every call is routed
     through `ToolRegistry`, permission-checked against the run's role,
-    and audited here."""
+    and audited here.
+
+    Uses the service-scoped run/action stores (not `get_run_store`/
+    `get_action_store`): this request carries no end-user JWT — it's
+    authenticated via `verify_internal_service` instead — so there's
+    no user identity to scope the Supabase query by."""
     result = await tool_execution_service.execute_tool(
         run_id=request.run_id,
         tool_name=request.tool_name,

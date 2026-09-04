@@ -24,13 +24,15 @@ class FakeVectorStore(VectorStore):
         self._results = results or []
         self.last_query_embedding: list[float] | None = None
         self.last_top_k: int | None = None
+        self.last_unit_id: str | None = None
 
     def add(self, chunks: Any, embeddings: Any) -> None:
         raise NotImplementedError
 
-    def search(self, query_embedding: list[float], top_k: int) -> list[DocumentChunk]:
+    def search(self, query_embedding: list[float], top_k: int, unit_id: str | None = None) -> list[DocumentChunk]:
         self.last_query_embedding = query_embedding
         self.last_top_k = top_k
+        self.last_unit_id = unit_id
         return self._results[:top_k]
 
     def delete(self, document_id: str) -> None:
@@ -95,6 +97,26 @@ async def test_retrieve_rejects_invalid_top_k() -> None:
 
     with pytest.raises(ValueError):
         await retriever.retrieve("query", top_k=0)
+
+
+@pytest.mark.anyio
+async def test_retrieve_forwards_unit_id_to_vector_store() -> None:
+    store = FakeVectorStore([make_result("chunk-1", 0.9)])
+    retriever = VectorStoreRetriever(store, FakeEmbeddingProvider())
+
+    await retriever.retrieve("query", top_k=5, unit_id="unit-a")
+
+    assert store.last_unit_id == "unit-a"
+
+
+@pytest.mark.anyio
+async def test_retrieve_defaults_unit_id_to_none() -> None:
+    store = FakeVectorStore([make_result("chunk-1", 0.9)])
+    retriever = VectorStoreRetriever(store, FakeEmbeddingProvider())
+
+    await retriever.retrieve("query", top_k=5)
+
+    assert store.last_unit_id is None
 
 
 @pytest.mark.anyio

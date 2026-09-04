@@ -25,7 +25,7 @@ async def main():
     print("\n\nEXECUTING PLAN")
     print("=" * 40)
 
-    results = await agent.execute_plan(plan)
+    results = await agent.execute_plan("test-run-id", plan)
 
     for result in results:
         print(f"\nStep: {result['step']}")

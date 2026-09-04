@@ -3,7 +3,7 @@ insert into auth.users (id, email, raw_user_meta_data)
 values
   ('8d8e6b39-7363-454b-90e1-c0a3c73ba32f', 'rohan@mrpl.demo', '{}'),
   ('48a7fdae-8e3e-451a-aca9-d7d6e41db080', 'priya@mrpl.demo', '{}'),
-  ('86b0618d-77b6-47f8-83e0-255dfc48986', 'suresh@mrpl.demo', '{}'),
+  ('192fc5ef-5745-43f3-aae0-2673747159df', 'suresh@mrpl.demo', '{}'),
   ('af9dccfa-d9d9-49c3-943d-3562848ba54a', 'kavya@mrpl.demo', '{}')
 on conflict (id) do nothing;
 
@@ -41,7 +41,7 @@ on conflict (id) do nothing;
 insert into user_profiles (id, full_name, role, unit_id) values
   ('8d8e6b39-7363-454b-90e1-c0a3c73ba32f', 'Rohan Iyer',    'engineer', '11111111-1111-1111-1111-111111111111'),
   ('48a7fdae-8e3e-451a-aca9-d7d6e41db080', 'Priya Nair',    'engineer', '22222222-2222-2222-2222-222222222222'),
-  ('86b0618d-77b6-47f8-83e0-255dfc48986', 'Suresh Menon',  'manager',  '11111111-1111-1111-1111-111111111111'),
+  ('192fc5ef-5745-43f3-aae0-2673747159df', 'Suresh Menon',  'manager',  '11111111-1111-1111-1111-111111111111'),
   ('af9dccfa-d9d9-49c3-943d-3562848ba54a', 'Kavya Das',     'manager',  '22222222-2222-2222-2222-222222222222')
 on conflict (id) do nothing;
 
@@ -118,4 +118,4 @@ insert into checklists (unit_id, checklist_type, items, generated_by) values
      {"item": "Verify all personnel briefed on startup sequence", "checked": true, "notes": ""},
      {"item": "Confirm no open SOP violations for this unit", "checked": false, "notes": "SOP-09.1 still in_progress — flag to shift manager"}
    ]'::jsonb,
-   '86b0618d-77b6-47f8-83e0-255dfc48986');
+   '192fc5ef-5745-43f3-aae0-2673747159df');

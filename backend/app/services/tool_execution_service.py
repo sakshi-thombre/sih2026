@@ -67,8 +67,9 @@ async def execute_tool(
         )
         return ToolResult(success=False, error="Tool input failed validation")
 
+    caller = {"user_id": run.user_id, "role": run.role, "unit_id": run.unit_id}
     try:
-        result = await tool.run(validated_input)
+        result = await tool.run(validated_input, caller=caller)
     except Exception:
         logger.exception("tool_execution_unexpected_error", extra={"tool_name": tool_name})
         await _record(
