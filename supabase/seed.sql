@@ -1,10 +1,10 @@
 -- Demo Auth users for local development
 insert into auth.users (id, email, raw_user_meta_data)
 values
-  ('aaaaaaaa-0000-0000-0000-000000000001', 'rohan@mrpl.demo', '{}'),
-  ('aaaaaaaa-0000-0000-0000-000000000002', 'priya@mrpl.demo', '{}'),
-  ('aaaaaaaa-0000-0000-0000-000000000003', 'suresh@mrpl.demo', '{}'),
-  ('aaaaaaaa-0000-0000-0000-000000000004', 'kavya@mrpl.demo', '{}')
+  ('8d8e6b39-7363-454b-90e1-c0a3c73ba32f', 'rohan@mrpl.demo', '{}'),
+  ('48a7fdae-8e3e-451a-aca9-d7d6e41db080', 'priya@mrpl.demo', '{}'),
+  ('86b0618d-77b6-47f8-83e0-255dfc48986', 'suresh@mrpl.demo', '{}'),
+  ('af9dccfa-d9d9-49c3-943d-3562848ba54a', 'kavya@mrpl.demo', '{}')
 on conflict (id) do nothing;
 
 -- ============================================================
@@ -39,10 +39,10 @@ on conflict (id) do nothing;
 --    foreign key check otherwise.
 -- ------------------------------------------------------------
 insert into user_profiles (id, full_name, role, unit_id) values
-  ('aaaaaaaa-0000-0000-0000-000000000001', 'Rohan Iyer',    'engineer', '11111111-1111-1111-1111-111111111111'),
-  ('aaaaaaaa-0000-0000-0000-000000000002', 'Priya Nair',    'engineer', '22222222-2222-2222-2222-222222222222'),
-  ('aaaaaaaa-0000-0000-0000-000000000003', 'Suresh Menon',  'manager',  '11111111-1111-1111-1111-111111111111'),
-  ('aaaaaaaa-0000-0000-0000-000000000004', 'Kavya Das',     'manager',  '22222222-2222-2222-2222-222222222222')
+  ('8d8e6b39-7363-454b-90e1-c0a3c73ba32f', 'Rohan Iyer',    'engineer', '11111111-1111-1111-1111-111111111111'),
+  ('48a7fdae-8e3e-451a-aca9-d7d6e41db080', 'Priya Nair',    'engineer', '22222222-2222-2222-2222-222222222222'),
+  ('86b0618d-77b6-47f8-83e0-255dfc48986', 'Suresh Menon',  'manager',  '11111111-1111-1111-1111-111111111111'),
+  ('af9dccfa-d9d9-49c3-943d-3562848ba54a', 'Kavya Das',     'manager',  '22222222-2222-2222-2222-222222222222')
 on conflict (id) do nothing;
 
 -- ------------------------------------------------------------
@@ -52,32 +52,32 @@ on conflict (id) do nothing;
 insert into incidents (unit_id, title, description, severity, occurred_at, reported_by) values
   ('11111111-1111-1111-1111-111111111111', 'Minor steam leak near Reactor 2',
    'Small steam leak detected at flange joint on Reactor 2 during routine inspection. Isolated and repaired within 2 hours.',
-   'low', now() - interval '5 months', 'aaaaaaaa-0000-0000-0000-000000000001'),
+   'low', now() - interval '5 months', '8d8e6b39-7363-454b-90e1-c0a3c73ba32f'),
 
   ('11111111-1111-1111-1111-111111111111', 'Pressure gauge malfunction, Line 4',
    'Pressure gauge on Line 4 showed erratic readings during shift changeover. Replaced faulty sensor, no product loss.',
-   'medium', now() - interval '4 months', 'aaaaaaaa-0000-0000-0000-000000000001'),
+   'medium', now() - interval '4 months', '8d8e6b39-7363-454b-90e1-c0a3c73ba32f'),
 
   ('11111111-1111-1111-1111-111111111111', 'Near-miss: forklift collision risk',
    'Forklift operator narrowly avoided collision with pedestrian near loading bay due to blind corner. No injuries. Signage added.',
-   'medium', now() - interval '3 months', 'aaaaaaaa-0000-0000-0000-000000000001'),
+   'medium', now() - interval '3 months', '8d8e6b39-7363-454b-90e1-c0a3c73ba32f'),
 
   ('11111111-1111-1111-1111-111111111111', 'Fire alarm false trigger, Control Room',
    'Smoke detector triggered false alarm due to dust accumulation. Evacuation drill completed in 4 minutes.',
-   'low', now() - interval '2 months', 'aaaaaaaa-0000-0000-0000-000000000001'),
+   'low', now() - interval '2 months', '8d8e6b39-7363-454b-90e1-c0a3c73ba32f'),
 
   ('11111111-1111-1111-1111-111111111111', 'Chemical spill, Storage Bay 2',
    'Small quantity of catalyst solution spilled during transfer. Contained per SOP, no exposure reported. Incident under review for procedural gaps.',
-   'high', now() - interval '1 months', 'aaaaaaaa-0000-0000-0000-000000000001'),
+   'high', now() - interval '1 months', '8d8e6b39-7363-454b-90e1-c0a3c73ba32f'),
 
   ('11111111-1111-1111-1111-111111111111', 'Unplanned shutdown, Compressor Unit',
    'Compressor tripped due to high vibration reading. Root cause traced to bearing wear. Unit restarted after 6-hour maintenance window.',
-   'critical', now() - interval '10 days', 'aaaaaaaa-0000-0000-0000-000000000001'),
+   'critical', now() - interval '10 days', '8d8e6b39-7363-454b-90e1-c0a3c73ba32f'),
 
   -- A couple in Unit 5 too, so unit-filtering is demonstrably working
   ('22222222-2222-2222-2222-222222222222', 'Routine valve inspection flag',
    'Valve V-22 showed minor corrosion during scheduled inspection. Scheduled for replacement next maintenance cycle.',
-   'low', now() - interval '3 months', 'aaaaaaaa-0000-0000-0000-000000000002');
+   'low', now() - interval '3 months', '48a7fdae-8e3e-451a-aca9-d7d6e41db080');
 
 -- ------------------------------------------------------------
 -- SOP violations — Q2 2026, mixed statuses, so "list Q2 violations
@@ -118,4 +118,4 @@ insert into checklists (unit_id, checklist_type, items, generated_by) values
      {"item": "Verify all personnel briefed on startup sequence", "checked": true, "notes": ""},
      {"item": "Confirm no open SOP violations for this unit", "checked": false, "notes": "SOP-09.1 still in_progress — flag to shift manager"}
    ]'::jsonb,
-   'aaaaaaaa-0000-0000-0000-000000000003');
+   '86b0618d-77b6-47f8-83e0-255dfc48986');
